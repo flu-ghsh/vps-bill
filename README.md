@@ -1,79 +1,268 @@
-# VPS Billing Manager 2.0.0
+# VPS Bill
 
-Автономный Telegram-first менеджер оплат VPS. Никакого Infra Billing и отдельной web-панели.
+Telegram-бот для учёта VPS и серверов, контроля расходов, сроков оплаты и состояния инфраструктуры.
 
-## Что умеет
+**Текущая версия: 2.5.3**
 
-- собственная SQLite база серверов и оплат;
-- добавление VPS прямо в Telegram;
-- суммы, валюты, провайдеры, дата и период оплаты;
-- уведомления за 7/3/1/0 дней и ежедневные просроченные напоминания;
-- `✅ Оплатил` записывает платёж и автоматически переносит следующую дату;
-- `⏰ Напомнить завтра`;
-- история оплат, ближайшие оплаты, аналитика по валютам;
-- автоматический месячный отчёт;
-- SOCKS5 применяется только к Telegram Bot API;
-- optional Telegram custom/premium emoji IDs;
-- backup/restore SQLite;
-- безопасное обновление с тестовой миграцией и rollback.
+## Возможности
 
-## Единственная рабочая директория
+VPS Bill позволяет вести серверную инфраструктуру прямо из Telegram:
+
+* учёт VPS и серверов;
+* провайдеры и страны;
+* IP-адреса;
+* стоимость серверов;
+* циклы и даты оплаты;
+* история платежей;
+* заметки;
+* мониторинг серверов;
+* аналитика расходов;
+* резервное копирование базы;
+* восстановление из резервной копии;
+* управление справочниками;
+* настройка интерфейса и emoji;
+* автоматические уведомления.
+
+Все данные хранятся локально в SQLite.
+
+## Быстрая установка
+
+Для установки на чистый Linux-сервер выполните одну команду:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/flu-ghsh/vps-bill/main/install.sh)
+```
+
+Установщик сам подготовит VPS Bill и запросит необходимые параметры Telegram-бота.
+
+После установки проект находится в:
+
+```text
+/opt/vps-bill
+```
+
+## Что понадобится
+
+Перед установкой создайте Telegram-бота через [@BotFather](https://t.me/BotFather) и получите его Bot Token.
+
+Также понадобится ваш numeric Telegram ID, который будет использоваться для доступа к административному интерфейсу бота.
+
+## Управление
+
+Статус контейнера:
+
+```bash
+cd /opt/vps-bill
+docker compose ps
+```
+
+Просмотр логов:
+
+```bash
+cd /opt/vps-bill
+docker compose logs -f
+```
+
+Перезапуск:
+
+```bash
+cd /opt/vps-bill
+docker compose restart
+```
+
+Остановка:
+
+```bash
+cd /opt/vps-bill
+docker compose down
+```
+
+Запуск:
+
+```bash
+cd /opt/vps-bill
+docker compose up -d
+```
+
+## Обновление
+
+Для обновления установленного VPS Bill:
+
+```bash
+vps-bill-update
+```
+
+Перед обновлением автоматически может быть создана резервная копия текущей базы.
+
+Текущую версию можно посмотреть командой:
+
+```bash
+cat /opt/vps-bill/VERSION
+```
+
+## Резервное копирование
+
+Создать резервную копию:
+
+```bash
+vps-bill-backup
+```
+
+Резервные копии хранятся в:
+
+```text
+/opt/vps-bill/backups
+```
+
+Рабочая база находится в:
+
+```text
+/opt/vps-bill/data/billing.db
+```
+
+## Восстановление
+
+Для восстановления используйте:
+
+```bash
+vps-bill-restore
+```
+
+Перед восстановлением рекомендуется сохранить текущую базу.
+
+## Структура установки
 
 ```text
 /opt/vps-bill/
 ├── .env
-├── compose.yaml -> current/compose.yaml
-├── data/billing.db
+├── VERSION
+├── compose.yaml
+├── current -> releases/<version>
+├── data/
+│   └── billing.db
 ├── backups/
-├── releases/
-└── current -> releases/2.0.0
+└── releases/
 ```
 
-`.env` всегда находится только в `/opt/vps-bill/.env`.
+`current` указывает на активную установленную версию VPS Bill.
 
-## Установка
+## Конфигурация
 
-```bash
-cd /opt/vps-bill
-chmod +x install.sh
-./install.sh
-```
-
-Установщик спросит только Bot Token, Telegram numeric ID, SOCKS5 и timezone.
-
-SOCKS5 можно вводить коротко:
+Основные параметры находятся в:
 
 ```text
-s5.yabadabadoo.ru:1080
+/opt/vps-bill/.env
 ```
 
-Он будет сохранён как `socks5://s5.yabadabadoo.ru:1080`. Для aiohttp-socks DNS SOCKS5 резолвится через proxy.
+Пример конфигурации доступен в репозитории:
 
-## Управление
+```text
+.env.example
+```
+
+Файл `.env` содержит приватные данные и не должен публиковаться или добавляться в Git.
+
+## Docker
+
+VPS Bill запускается в Docker-контейнере.
+
+Рабочие данные и резервные копии находятся вне контейнера:
+
+```text
+/opt/vps-bill/data
+/opt/vps-bill/backups
+```
+
+Это позволяет обновлять или пересоздавать контейнер без потери данных.
+
+Контейнер запускается с ограниченными правами и read-only файловой системой.
+
+## Ручная установка исходников
+
+Для разработки проект можно клонировать:
 
 ```bash
-docker compose -f /opt/vps-bill/compose.yaml --env-file /opt/vps-bill/.env ps
-docker logs -f vps-bill
-billing-bot-backup
-billing-bot-restore
-billing-bot-update --file /root/vps-bill-2.0.1.tar.gz
+git clone https://github.com/flu-ghsh/vps-bill.git
+cd vps-bill
 ```
 
-## Безопасное обновление
+Основной код находится в:
 
-`billing-bot-update`:
+```text
+app/
+```
 
-1. собирает новый image, не останавливая старый бот;
-2. делает online backup SQLite;
-3. запускает миграцию новой версии на копии backup;
-4. проверяет копию через `PRAGMA integrity_check`;
-5. только после этого останавливает старую версию;
-6. мигрирует реальную БД и запускает новую;
-7. проверяет DB + Telegram через SOCKS5;
-8. при ошибке восстанавливает backup и предыдущий release.
+Тесты:
 
-`.env` при обновлении не заменяется.
+```text
+tests/
+```
 
-## Custom / Premium emoji
+Скрипты обслуживания:
 
-В `/opt/vps-bill/.env` можно заполнить `EMOJI_*_ID`. Если ID пустой, бот использует обычный Unicode emoji.
+```text
+scripts/
+```
+
+## Обновление исходников через Git
+
+Получить последние изменения:
+
+```bash
+git pull
+```
+
+Посмотреть текущую ветку:
+
+```bash
+git branch
+```
+
+Посмотреть историю:
+
+```bash
+git log --oneline --decorate -10
+```
+
+## Безопасность
+
+Не публикуйте:
+
+```text
+.env
+data/billing.db
+backups/
+releases/
+```
+
+Эти файлы и каталоги исключены из репозитория через `.gitignore`.
+
+Telegram Bot Token и другие приватные параметры должны храниться только в `.env`.
+
+## Репозиторий
+
+GitHub:
+
+```text
+https://github.com/flu-ghsh/vps-bill
+```
+
+## Версия
+
+VPS Bill использует семантическое версионирование:
+
+```text
+MAJOR.MINOR.PATCH
+```
+
+Например:
+
+```text
+2.5.3
+```
+
+Версии проекта публикуются в GitHub Releases и отмечаются Git-тегами вида:
+
+```text
+v2.5.3
+```
