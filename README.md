@@ -1,3 +1,6 @@
+<img width="1672" height="941" alt="image" src="https://github.com/user-attachments/assets/c000b706-798a-45d3-84d7-013b9779453d" />
+
+
 # VPS Bill
 
 Telegram-бот для учёта VPS серверов, расходов, контроль дат оплаты, оповещения в TG, мониторинг доступности серверов.
