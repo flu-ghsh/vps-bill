@@ -80,14 +80,13 @@ chmod +x "$RELEASE/scripts"/*.sh
 if [[ -f "$ENV" ]] && grep -q '^BOT_TOKEN=' "$ENV" && grep -q '^ADMIN_IDS=' "$ENV"; then
   c "Найден $ENV — сохраняю существующие настройки"
 else
-  BOT_TOKEN=""; ADMIN_IDS=""; TELEGRAM_PROXY=""; TZ_VALUE=""; UPDATE_MANIFEST_URL=""
+  BOT_TOKEN=""; ADMIN_IDS=""; TELEGRAM_PROXY=""; TZ_VALUE=""
   while [[ -z "$BOT_TOKEN" ]]; do secret BOT_TOKEN "BOT_TOKEN от @BotFather"; [[ -n "$BOT_TOKEN" ]] || err "BOT_TOKEN не может быть пустым"; done
   while [[ -z "$ADMIN_IDS" ]]; do ask ADMIN_IDS "Ваш Telegram numeric ID"; [[ "$ADMIN_IDS" =~ ^[0-9]+([,;][0-9]+)*$ ]] || { err "Нужен numeric Telegram ID"; ADMIN_IDS=""; }; done
   ask TELEGRAM_PROXY "SOCKS5 для Telegram (например s5.example.com:1080; пусто = напрямую)" ""
   TELEGRAM_PROXY="$(normalize_proxy "$TELEGRAM_PROXY")"
   SYS_TZ=$(timedatectl show -p Timezone --value 2>/dev/null || true); SYS_TZ=${SYS_TZ:-Europe/Moscow}
   ask TZ_VALUE "Timezone" "$SYS_TZ"
-  ask UPDATE_MANIFEST_URL "URL manifest обновлений (можно пусто)" ""
   cat > "$ENV" <<EOF
 APP_VERSION=$VERSION
 BOT_TOKEN=$(qenv "$BOT_TOKEN")
@@ -98,7 +97,6 @@ CHECK_INTERVAL_SECONDS=60
 REMINDER_DAYS="7,3,1,0"
 MONTHLY_REPORT_ENABLED=true
 REPORT_HOUR=10
-UPDATE_MANIFEST_URL=$(qenv "$UPDATE_MANIFEST_URL")
 EMOJI_MONEY_ID=""
 EMOJI_SERVER_ID=""
 EMOJI_CHART_ID=""
