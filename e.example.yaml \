@@ -1,0 +1,145 @@
+[1mdiff --git a/.env.example b/.env.example[m
+[1mindex 01c0510..164ab94 100644[m
+[1m--- a/.env.example[m
+[1m+++ b/.env.example[m
+[36m@@ -1,4 +1,4 @@[m
+[31m-APP_VERSION=2.5.3[m
+[32m+[m[32mAPP_VERSION=2.5.4[m
+ BOT_TOKEN="INSERT_YOUR_BOT_TOKEN_HERE"[m
+ ADMIN_IDS="INSERT_YOUR_TG_ID_HERE"[m
+ TELEGRAM_PROXY="socks5://user:pass@example.com:1080"[m
+[1mdiff --git a/README.md b/README.md[m
+[1mindex c1998bf..7e11d61 100644[m
+[1m--- a/README.md[m
+[1m+++ b/README.md[m
+[36m@@ -2,7 +2,7 @@[m
+ [m
+ Telegram-бот для учёта VPS и серверов, контроля расходов, сроков оплаты и состояния инфраструктуры.[m
+ [m
+[31m-**Текущая версия: 2.5.3**[m
+[32m+[m[32m**Текущая версия: 2.5.4**[m
+ [m
+ ## Возможности[m
+ [m
+[36m@@ -258,11 +258,11 @@[m [mMAJOR.MINOR.PATCH[m
+ Например:[m
+ [m
+ ```text[m
+[31m-2.5.3[m
+[32m+[m[32m2.5.4[m
+ ```[m
+ [m
+ Версии проекта публикуются в GitHub Releases и отмечаются Git-тегами вида:[m
+ [m
+ ```text[m
+[31m-v2.5.3[m
+[32m+[m[32mv2.5.4[m
+ ```[m
+[1mdiff --git a/VERSION b/VERSION[m
+[1mindex 227cea2..fe16b34 100644[m
+[1m--- a/VERSION[m
+[1m+++ b/VERSION[m
+[36m@@ -1 +1 @@[m
+[31m-2.0.0[m
+[32m+[m[32m2.5.4[m
+[1mdiff --git a/app/__init__.py b/app/__init__.py[m
+[1mindex 8c0d5d5..f4a337e 100644[m
+[1m--- a/app/__init__.py[m
+[1m+++ b/app/__init__.py[m
+[36m@@ -1 +1 @@[m
+[31m-__version__ = "2.0.0"[m
+[32m+[m[32m__version__ = "2.5.4"[m
+[1mdiff --git a/compose.example.yaml b/compose.example.yaml[m
+[1mindex ee07fbf..baf6f70 100644[m
+[1m--- a/compose.example.yaml[m
+[1m+++ b/compose.example.yaml[m
+[36m@@ -2,7 +2,7 @@[m [mname: vps-bill[m
+ [m
+ services:[m
+   bot:[m
+[31m-    image: vps-bill:${APP_VERSION:-2.5.3}[m
+[32m+[m[32m    image: vps-bill:${APP_VERSION:-2.5.4}[m
+     container_name: vps-bill[m
+     restart: unless-stopped[m
+     env_file:[m
+[1mdiff --git a/install.sh b/install.sh[m
+[1mindex c8df780..00828b2 100755[m
+[1m--- a/install.sh[m
+[1m+++ b/install.sh[m
+[36m@@ -54,7 +54,7 @@[m [mnormalize_proxy(){ local v; v="$(trim "${1:-}")"; [[ -n "$v" ]] || return 0; cas[m
+ [m
+ [[ $EUID -eq 0 ]] || { err "Запустите от root"; exit 1; }[m
+ [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { err "Некорректный VERSION"; exit 1; }[m
+[31m-c "VPS Billing Manager v$VERSION"[m
+[32m+[m[32mc "VPS Bill v$VERSION"[m
+ [m
+ apt-get update -qq[m
+ apt-get install -y -qq curl ca-certificates python3 util-linux >/dev/null[m
+[36m@@ -72,7 +72,8 @@[m [mchown -R 10001:10001 "$BASE/data" "$BASE/backups"[m
+ # Копируем только release-файлы; это безопасно даже когда install.sh запущен из /opt/vps-bill.[m
+ rm -rf "$RELEASE/app" "$RELEASE/scripts" "$RELEASE/tests"[m
+ cp -a "$SELF_DIR/app" "$SELF_DIR/scripts" "$SELF_DIR/tests" "$RELEASE/"[m
+[31m-cp -aL "$SELF_DIR/Dockerfile" "$SELF_DIR/requirements.txt" "$SELF_DIR/VERSION" "$SELF_DIR/compose.yaml" "$SELF_DIR/.dockerignore" "$SELF_DIR/.env.example" "$SELF_DIR/README.md" "$SELF_DIR/install.sh" "$RELEASE/"[m
+[32m+[m[32mcp -aL "$SELF_DIR/Dockerfile" "$SELF_DIR/requirements.txt" "$SELF_DIR/VERSION" "$SELF_DIR/.dockerignore" "$SELF_DIR/.env.example" "$SELF_DIR/README.md" "$SELF_DIR/install.sh" "$RELEASE/"[m
+[32m+[m[32mcp -aL "$SELF_DIR/compose.example.yaml" "$RELEASE/compose.yaml"[m
+ chmod +x "$RELEASE/scripts"/*.sh[m
+ [m
+ # Существующий валидный .env сохраняем. Пустой/старый env пересоздаём.[m
+[36m@@ -158,9 +159,12 @@[m [mif [[ $PASS -ne 1 ]]; then[m
+ fi[m
+ cat /tmp/vps-bill-health.log[m
+ [m
+[31m-ln -sfn "$BASE/current/scripts/update.sh" /usr/local/bin/billing-bot-update[m
+[31m-ln -sfn "$BASE/current/scripts/backup.sh" /usr/local/bin/billing-bot-backup[m
+[31m-ln -sfn "$BASE/current/scripts/restore.sh" /usr/local/bin/billing-bot-restore[m
+[32m+[m[32mln -sfn "$BASE/current/scripts/update.sh" /usr/local/bin/vps-bill-update[m
+[32m+[m[32mln -sfn "$BASE/current/scripts/backup.sh" /usr/local/bin/vps-bill-backup[m
+[32m+[m[32mln -sfn "$BASE/current/scripts/restore.sh" /usr/local/bin/vps-bill-restore[m
+ [m
+[31m-ok "VPS Billing Manager установлен"[m
+[31m-printf '\nРабочая папка: %s\nENV: %s\n\nКоманды:\n  docker compose -f %s/compose.yaml --env-file %s/.env ps\n  docker logs -f vps-bill\n  billing-bot-backup\n  billing-bot-restore\n  billing-bot-update --file <release.tar.gz>\n\n' "$BASE" "$ENV" "$BASE" "$BASE"[m
+[32m+[m[32m# Удаляем старые имена команд, если остались от прежних версий.[m
+[32m+[m[32mrm -f   /usr/local/bin/vps-bill-update   /usr/local/bin/vps-bill-backup   /usr/local/bin/vps-bill-restore[m
+[32m+[m
+[32m+[m[32mok "VPS Bill установлен"[m
+[32m+[m[32mprintf '\nРабочая папка: %s\nENV: %s\n\nКоманды:\n  docker compose -f %s/compose.yaml --env-file %s/.env ps\n  docker logs -f vps-bill\n  vps-bill-backup\n  vps-bill-restore\n  vps-bill-update --file <release.tar.gz>\n\n' "$BASE" "$ENV" "$BASE" "$BASE"[m
+[1mdiff --git a/scripts/update.sh b/scripts/update.sh[m
+[1mindex 5db5b59..8e30c75 100755[m
+[1m--- a/scripts/update.sh[m
+[1m+++ b/scripts/update.sh[m
+[36m@@ -5,13 +5,13 @@[m [mexec 9>"$LOCK"; flock -n 9 || { echo "Обновление уже выполня[m
+ [[ $EUID -eq 0 ]] || { echo "Запустите от root" >&2; exit 1; }[m
+ [[ -f "$ENV" && -L "$BASE/current" ]] || { echo "VPS Bill не установлен" >&2; exit 1; }[m
+ [m
+[31m-FILE=""; case "${1:-}" in --file) FILE="${2:-}";; "") ;; *) echo "Использование: billing-bot-update [--file release.tar.gz]" >&2; exit 2;; esac[m
+[32m+[m[32mFILE=""; case "${1:-}" in --file) FILE="${2:-}";; "") ;; *) echo "Использование: vps-bill-update [--file release.tar.gz]" >&2; exit 2;; esac[m
+ TMP=$(mktemp -d /tmp/vps-bill-update.XXXXXX); trap 'rm -rf "$TMP"' EXIT[m
+ OLD=$(tr -d '[:space:]' < "$BASE/current/VERSION")[m
+ [m
+ if [[ -z "$FILE" ]]; then[m
+   MANIFEST=$(grep '^UPDATE_MANIFEST_URL=' "$ENV" | head -1 | cut -d= -f2- | sed 's/^"//;s/"$//' || true)[m
+[31m-  [[ -n "$MANIFEST" ]] || { echo "UPDATE_MANIFEST_URL пуст. Используйте: billing-bot-update --file release.tar.gz" >&2; exit 1; }[m
+[32m+[m[32m  [[ -n "$MANIFEST" ]] || { echo "UPDATE_MANIFEST_URL пуст. Используйте: vps-bill-update --file release.tar.gz" >&2; exit 1; }[m
+   echo "Получаю manifest: $MANIFEST"[m
+   curl -fsSL "$MANIFEST" -o "$TMP/latest.json"[m
+   URL=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["url"])' "$TMP/latest.json")[m
+[1mdiff --git a/update.sh b/update.sh[m
+[1mindex 5db5b59..8e30c75 100644[m
+[1m--- a/update.sh[m
+[1m+++ b/update.sh[m
+[36m@@ -5,13 +5,13 @@[m [mexec 9>"$LOCK"; flock -n 9 || { echo "Обновление уже выполня[m
+ [[ $EUID -eq 0 ]] || { echo "Запустите от root" >&2; exit 1; }[m
+ [[ -f "$ENV" && -L "$BASE/current" ]] || { echo "VPS Bill не установлен" >&2; exit 1; }[m
+ [m
+[31m-FILE=""; case "${1:-}" in --file) FILE="${2:-}";; "") ;; *) echo "Использование: billing-bot-update [--file release.tar.gz]" >&2; exit 2;; esac[m
+[32m+[m[32mFILE=""; case "${1:-}" in --file) FILE="${2:-}";; "") ;; *) echo "Использование: vps-bill-update [--file release.tar.gz]" >&2; exit 2;; esac[m
+ TMP=$(mktemp -d /tmp/vps-bill-update.XXXXXX); trap 'rm -rf "$TMP"' EXIT[m
+ OLD=$(tr -d '[:space:]' < "$BASE/current/VERSION")[m
+ [m
+ if [[ -z "$FILE" ]]; then[m
+   MANIFEST=$(grep '^UPDATE_MANIFEST_URL=' "$ENV" | head -1 | cut -d= -f2- | sed 's/^"//;s/"$//' || true)[m
+[31m-  [[ -n "$MANIFEST" ]] || { echo "UPDATE_MANIFEST_URL пуст. Используйте: billing-bot-update --file release.tar.gz" >&2; exit 1; }[m
+[32m+[m[32m  [[ -n "$MANIFEST" ]] || { echo "UPDATE_MANIFEST_URL пуст. Используйте: vps-bill-update --file release.tar.gz" >&2; exit 1; }[m
+   echo "Получаю manifest: $MANIFEST"[m
+   curl -fsSL "$MANIFEST" -o "$TMP/latest.json"[m
+   URL=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["url"])' "$TMP/latest.json")[m
