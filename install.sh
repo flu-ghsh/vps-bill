@@ -54,7 +54,7 @@ normalize_proxy(){ local v; v="$(trim "${1:-}")"; [[ -n "$v" ]] || return 0; cas
 
 [[ $EUID -eq 0 ]] || { err "Запустите от root"; exit 1; }
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { err "Некорректный VERSION"; exit 1; }
-c "VPS Billing Manager v$VERSION"
+c "VPS Bill v$VERSION"
 
 apt-get update -qq
 apt-get install -y -qq curl ca-certificates python3 util-linux >/dev/null
@@ -72,7 +72,8 @@ chown -R 10001:10001 "$BASE/data" "$BASE/backups"
 # Копируем только release-файлы; это безопасно даже когда install.sh запущен из /opt/vps-bill.
 rm -rf "$RELEASE/app" "$RELEASE/scripts" "$RELEASE/tests"
 cp -a "$SELF_DIR/app" "$SELF_DIR/scripts" "$SELF_DIR/tests" "$RELEASE/"
-cp -aL "$SELF_DIR/Dockerfile" "$SELF_DIR/requirements.txt" "$SELF_DIR/VERSION" "$SELF_DIR/compose.yaml" "$SELF_DIR/.dockerignore" "$SELF_DIR/.env.example" "$SELF_DIR/README.md" "$SELF_DIR/install.sh" "$RELEASE/"
+cp -aL "$SELF_DIR/Dockerfile" "$SELF_DIR/requirements.txt" "$SELF_DIR/VERSION" "$SELF_DIR/.dockerignore" "$SELF_DIR/.env.example" "$SELF_DIR/README.md" "$SELF_DIR/install.sh" "$RELEASE/"
+cp -aL "$SELF_DIR/compose.example.yaml" "$RELEASE/compose.yaml"
 chmod +x "$RELEASE/scripts"/*.sh
 
 # Существующий валидный .env сохраняем. Пустой/старый env пересоздаём.
@@ -158,9 +159,12 @@ if [[ $PASS -ne 1 ]]; then
 fi
 cat /tmp/vps-bill-health.log
 
-ln -sfn "$BASE/current/scripts/update.sh" /usr/local/bin/billing-bot-update
-ln -sfn "$BASE/current/scripts/backup.sh" /usr/local/bin/billing-bot-backup
-ln -sfn "$BASE/current/scripts/restore.sh" /usr/local/bin/billing-bot-restore
+ln -sfn "$BASE/current/scripts/update.sh" /usr/local/bin/vps-bill-update
+ln -sfn "$BASE/current/scripts/backup.sh" /usr/local/bin/vps-bill-backup
+ln -sfn "$BASE/current/scripts/restore.sh" /usr/local/bin/vps-bill-restore
 
-ok "VPS Billing Manager установлен"
-printf '\nРабочая папка: %s\nENV: %s\n\nКоманды:\n  docker compose -f %s/compose.yaml --env-file %s/.env ps\n  docker logs -f vps-bill\n  billing-bot-backup\n  billing-bot-restore\n  billing-bot-update --file <release.tar.gz>\n\n' "$BASE" "$ENV" "$BASE" "$BASE"
+# Удаляем старые имена команд, если остались от прежних версий.
+rm -f   /usr/local/bin/vps-bill-update   /usr/local/bin/vps-bill-backup   /usr/local/bin/vps-bill-restore
+
+ok "VPS Bill установлен"
+printf '\nРабочая папка: %s\nENV: %s\n\nКоманды:\n  docker compose -f %s/compose.yaml --env-file %s/.env ps\n  docker logs -f vps-bill\n  vps-bill-backup\n  vps-bill-restore\n  vps-bill-update --file <release.tar.gz>\n\n' "$BASE" "$ENV" "$BASE" "$BASE"

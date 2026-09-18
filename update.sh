@@ -5,13 +5,13 @@ exec 9>"$LOCK"; flock -n 9 || { echo "Обновление уже выполня
 [[ $EUID -eq 0 ]] || { echo "Запустите от root" >&2; exit 1; }
 [[ -f "$ENV" && -L "$BASE/current" ]] || { echo "VPS Bill не установлен" >&2; exit 1; }
 
-FILE=""; case "${1:-}" in --file) FILE="${2:-}";; "") ;; *) echo "Использование: billing-bot-update [--file release.tar.gz]" >&2; exit 2;; esac
+FILE=""; case "${1:-}" in --file) FILE="${2:-}";; "") ;; *) echo "Использование: vps-bill-update [--file release.tar.gz]" >&2; exit 2;; esac
 TMP=$(mktemp -d /tmp/vps-bill-update.XXXXXX); trap 'rm -rf "$TMP"' EXIT
 OLD=$(tr -d '[:space:]' < "$BASE/current/VERSION")
 
 if [[ -z "$FILE" ]]; then
   MANIFEST=$(grep '^UPDATE_MANIFEST_URL=' "$ENV" | head -1 | cut -d= -f2- | sed 's/^"//;s/"$//' || true)
-  [[ -n "$MANIFEST" ]] || { echo "UPDATE_MANIFEST_URL пуст. Используйте: billing-bot-update --file release.tar.gz" >&2; exit 1; }
+  [[ -n "$MANIFEST" ]] || { echo "UPDATE_MANIFEST_URL пуст. Используйте: vps-bill-update --file release.tar.gz" >&2; exit 1; }
   echo "Получаю manifest: $MANIFEST"
   curl -fsSL "$MANIFEST" -o "$TMP/latest.json"
   URL=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["url"])' "$TMP/latest.json")
