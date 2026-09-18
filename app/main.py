@@ -44,7 +44,7 @@ async def main() -> None:
     notify_task = asyncio.create_task(notifier.run())
     try:
         me = await bot.get_me()
-        print(f"VPS Billing Bot started as @{me.username}", flush=True)
+        print(f"VPS Bill started as @{me.username}", flush=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         await notifier.stop()

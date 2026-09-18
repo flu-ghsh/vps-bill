@@ -24,7 +24,7 @@ def money(amount_minor: int, currency: str) -> str:
     value = f"{amount:,.2f}".replace(",", " ")
     if value.endswith(".00"):
         value = value[:-3]
-    symbols = {"RUB": "₽", "USD": "$", "EUR": "€", "CNY": "¥", "TRY": "₺"}
+    symbols = {"RUB": "₽", "USD": "$", "EUR": "€"}
     symbol = symbols.get(currency.upper())
     return f"{value} {symbol or currency.upper()}"
 
@@ -41,7 +41,11 @@ def parse_date(value: str) -> date:
 
 def next_due(current: str, cycle: str, cycle_days: int | None = None) -> str:
     d = date.fromisoformat(current)
-    if cycle == "monthly":
+    if cycle == "daily":
+        d = d + timedelta(days=1)
+    elif cycle == "weekly":
+        d = d + timedelta(weeks=1)
+    elif cycle == "monthly":
         d = d + relativedelta(months=1)
     elif cycle == "quarterly":
         d = d + relativedelta(months=3)
@@ -65,6 +69,8 @@ def days_until(due_iso: str, today: date | None = None) -> int:
 
 def cycle_label(cycle: str, cycle_days: int | None = None) -> str:
     labels = {
+        "daily": "ежедневно",
+        "weekly": "раз в неделю",
         "monthly": "ежемесячно",
         "quarterly": "раз в 3 месяца",
         "semiannual": "раз в 6 месяцев",
@@ -80,3 +86,28 @@ def sum_by_currency(rows: Iterable[dict], amount_key: str = "amount_minor") -> d
     for row in rows:
         out[row["currency"].upper()] += int(row[amount_key])
     return dict(out)
+
+
+def monthly_equivalent_minor(amount_minor: int, cycle: str, cycle_days: int | None = None) -> int:
+    """Approximate recurring monthly cost while preserving original currency."""
+    if cycle == "daily":
+        factor = Decimal(365) / Decimal(12)
+    elif cycle == "weekly":
+        factor = Decimal(52) / Decimal(12)
+    elif cycle == "monthly":
+        factor = Decimal(1)
+    elif cycle == "quarterly":
+        factor = Decimal(1) / Decimal(3)
+    elif cycle == "semiannual":
+        factor = Decimal(1) / Decimal(6)
+    elif cycle == "yearly":
+        factor = Decimal(1) / Decimal(12)
+    elif cycle == "custom" and cycle_days:
+        factor = Decimal(365) / Decimal(12 * cycle_days)
+    else:
+        factor = Decimal(0)
+    return int((Decimal(amount_minor) * factor).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def annual_equivalent_minor(amount_minor: int, cycle: str, cycle_days: int | None = None) -> int:
+    return monthly_equivalent_minor(amount_minor, cycle, cycle_days) * 12

@@ -37,7 +37,7 @@ echo "[1/7] Собираю новый image, старый бот продолж�
 docker build -t "vps-bill:$NEW" "$TARGET" >/tmp/vps-bill-update-build.log 2>&1 || { cat /tmp/vps-bill-update-build.log; exit 1; }
 
 echo "[2/7] Создаю online backup"
-TS=$(date +%Y%m%d-%H%M%S); BNAME="pre-update-${OLD}-to-${NEW}-${TS}.db"; BACKUP="$BASE/backups/$BNAME"
+TS=$(date +%Y%m%d-%H%M%S); BNAME="vps-bill-pre-update-${OLD}-to-${NEW}-${TS}.db"; BACKUP="$BASE/backups/$BNAME"
 mkdir -p "$BASE/backups"; chown 10001:10001 "$BASE/backups"
 docker compose -f "$COMPOSE" --env-file "$ENV" run --rm bot python -m app.cli backup --output "/app/backups/$BNAME" >/dev/null
 [[ -s "$BACKUP" ]] || { echo "Backup не создан" >&2; exit 1; }
@@ -74,7 +74,7 @@ docker compose -f "$COMPOSE" --env-file "$ENV" up -d >/dev/null
 echo "[7/7] Health-check DB + Telegram"
 PASS=0
 for _ in $(seq 1 15); do
-  if docker compose -f "$COMPOSE" --env-file "$ENV" exec -T bot python -m app.cli health --telegram >/tmp/vps-bill-update-health.log 2>&1; then PASS=1; break; fi
+  if docker compose -f "$COMPOSE" --env-file "$ENV" exec -T bot python -m app.cli health --telegram --runtime >/tmp/vps-bill-update-health.log 2>&1; then PASS=1; break; fi
   sleep 2
 done
 [[ $PASS -eq 1 ]] || { cat /tmp/vps-bill-update-health.log >&2 || true; false; }

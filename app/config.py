@@ -1,20 +1,33 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 
+def _env_value(name: str, default: str = "") -> str:
+    """Read a scalar from environment and tolerate dotenv-style outer quotes.
+
+    Docker Compose strips quotes from env_file values, while `docker run --env-file`
+    may pass them literally. Updates use both code paths, so config parsing must
+    accept either representation.
+    """
+    value = os.getenv(name, default).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
+        value = value[1:-1].strip()
+    return value
+
+
 def _required(name: str) -> str:
-    value = os.getenv(name, "").strip()
+    value = _env_value(name)
     if not value:
         raise RuntimeError(f"Environment variable {name} is required")
     return value
 
 
 def _admin_ids() -> frozenset[int]:
-    raw = os.getenv("ADMIN_IDS", os.getenv("ADMIN_ID", "")).strip()
+    raw = _env_value("ADMIN_IDS", _env_value("ADMIN_ID"))
     if not raw:
         raise RuntimeError("ADMIN_IDS is required")
     result: set[int] = set()
@@ -52,34 +65,6 @@ def mask_proxy(value: str | None) -> str:
         return "настроен"
 
 
-def _bool_env(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _reminder_days() -> tuple[int, ...]:
-    raw = os.getenv("REMINDER_DAYS", "7,3,1,0")
-    out: list[int] = []
-    for p in raw.split(","):
-        p = p.strip()
-        if p:
-            out.append(int(p))
-    return tuple(sorted(set(out), reverse=True))
-
-
-@dataclass(frozen=True)
-class EmojiConfig:
-    money: str | None = field(default_factory=lambda: os.getenv("EMOJI_MONEY_ID") or None)
-    server: str | None = field(default_factory=lambda: os.getenv("EMOJI_SERVER_ID") or None)
-    chart: str | None = field(default_factory=lambda: os.getenv("EMOJI_CHART_ID") or None)
-    calendar: str | None = field(default_factory=lambda: os.getenv("EMOJI_CALENDAR_ID") or None)
-    settings: str | None = field(default_factory=lambda: os.getenv("EMOJI_SETTINGS_ID") or None)
-    ok: str | None = field(default_factory=lambda: os.getenv("EMOJI_OK_ID") or None)
-    warning: str | None = field(default_factory=lambda: os.getenv("EMOJI_WARNING_ID") or None)
-
-
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
@@ -87,27 +72,19 @@ class Settings:
     telegram_proxy: str | None
     timezone: str
     check_interval: int
-    reminder_days: tuple[int, ...]
-    monthly_report_enabled: bool
-    report_hour: int
     db_path: Path
     backups_dir: Path
     update_manifest_url: str | None
-    emojis: EmojiConfig
 
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
             bot_token=_required("BOT_TOKEN"),
             admin_ids=_admin_ids(),
-            telegram_proxy=normalize_proxy(os.getenv("TELEGRAM_PROXY")),
-            timezone=os.getenv("TZ", "Europe/Moscow"),
-            check_interval=max(30, int(os.getenv("CHECK_INTERVAL_SECONDS", "60"))),
-            reminder_days=_reminder_days(),
-            monthly_report_enabled=_bool_env("MONTHLY_REPORT_ENABLED", True),
-            report_hour=max(0, min(23, int(os.getenv("REPORT_HOUR", "10")))),
-            db_path=Path(os.getenv("DB_PATH", "/app/data/billing.db")),
-            backups_dir=Path(os.getenv("BACKUPS_DIR", "/app/backups")),
-            update_manifest_url=os.getenv("UPDATE_MANIFEST_URL") or None,
-            emojis=EmojiConfig(),
+            telegram_proxy=normalize_proxy(_env_value("TELEGRAM_PROXY") or None),
+            timezone=_env_value("TZ", "Europe/Moscow"),
+            check_interval=max(30, int(_env_value("CHECK_INTERVAL_SECONDS", "60"))),
+            db_path=Path(_env_value("DB_PATH", "/app/data/billing.db")),
+            backups_dir=Path(_env_value("BACKUPS_DIR", "/app/backups")),
+            update_manifest_url=_env_value("UPDATE_MANIFEST_URL") or None,
         )
