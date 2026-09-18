@@ -1,4 +1,35 @@
 #!/usr/bin/env bash
+
+# VPS_BILL_REMOTE_BOOTSTRAP
+# При запуске через curl/process substitution рядом со скриптом нет VERSION
+# и остальных файлов проекта. В таком случае скачиваем весь репозиторий
+# во временный каталог и запускаем локальную копию install.sh.
+_VPS_BILL_SCRIPT="${BASH_SOURCE[0]:-}"
+_VPS_BILL_DIR="$(cd -- "$(dirname -- "$_VPS_BILL_SCRIPT")" 2>/dev/null && pwd -P || true)"
+
+if [[ -z "$_VPS_BILL_DIR" || ! -f "$_VPS_BILL_DIR/VERSION" ]]; then
+    _VPS_BILL_TMP="$(mktemp -d)"
+
+    _vps_bill_cleanup() {
+        rm -rf "$_VPS_BILL_TMP"
+    }
+    trap _vps_bill_cleanup EXIT
+
+    echo "▶ Загружаю VPS Bill с GitHub..."
+
+    curl -fsSL \
+        "https://github.com/flu-ghsh/vps-bill/archive/refs/heads/main.tar.gz" \
+        | tar -xz -C "$_VPS_BILL_TMP" --strip-components=1
+
+    if [[ ! -f "$_VPS_BILL_TMP/install.sh" ]]; then
+        echo "✖ Не удалось загрузить установщик VPS Bill."
+        exit 1
+    fi
+
+    bash "$_VPS_BILL_TMP/install.sh" "$@"
+    exit $?
+fi
+
 set -Eeuo pipefail
 
 BASE=/opt/vps-bill
