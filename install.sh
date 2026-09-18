@@ -168,12 +168,19 @@ else
   ok "SOCKS5 не задан — используется прямое подключение к Telegram"
 fi
 
+
+# Удаляем старые имена команд, если остались от прежних версий.
+rm -f   /usr/local/bin/vps-bill-update   /usr/local/bin/vps-bill-backup   /usr/local/bin/vps-bill-restore
+
+# Команды управления VPS Bill
 ln -sfn "$BASE/current/scripts/update.sh" /usr/local/bin/vps-bill-update
 ln -sfn "$BASE/current/scripts/backup.sh" /usr/local/bin/vps-bill-backup
 ln -sfn "$BASE/current/scripts/restore.sh" /usr/local/bin/vps-bill-restore
 
-# Удаляем старые имена команд, если остались от прежних версий.
-rm -f   /usr/local/bin/vps-bill-update   /usr/local/bin/vps-bill-backup   /usr/local/bin/vps-bill-restore
+chmod +x   "$BASE/current/scripts/update.sh"   "$BASE/current/scripts/backup.sh"   "$BASE/current/scripts/restore.sh"
+
+# Старые названия больше не используются.
+rm -f   /usr/local/bin/billing-bot-update   /usr/local/bin/billing-bot-backup   /usr/local/bin/billing-bot-restore
 
 ok "VPS Bill установлен"
 printf '\nРабочая папка: %s\nENV: %s\n\nКоманды:\n  docker compose -f %s/compose.yaml --env-file %s/.env ps\n  docker logs -f vps-bill\n  vps-bill-backup\n  vps-bill-restore\n  vps-bill-update --file <release.tar.gz>\n\n' "$BASE" "$ENV" "$BASE" "$BASE"
