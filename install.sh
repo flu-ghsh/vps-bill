@@ -146,18 +146,27 @@ ok "База готова: $BASE/data/billing.db"
 
 docker compose -f "$BASE/compose.yaml" --env-file "$ENV" up -d
 
-c "Проверяю Telegram через SOCKS5"
-PASS=0
-for _ in $(seq 1 15); do
-  if docker compose -f "$BASE/compose.yaml" --env-file "$ENV" exec -T bot python -m app.cli health --telegram >/tmp/vps-bill-health.log 2>&1; then PASS=1; break; fi
-  sleep 2
-done
-if [[ $PASS -ne 1 ]]; then
-  cat /tmp/vps-bill-health.log >&2 || true
-  err "Health-check не пройден. Логи: docker logs vps-bill"
-  exit 1
+if [[ -n "${TELEGRAM_PROXY:-}" ]]; then
+  c "Проверяю Telegram через SOCKS5"
+  PASS=0
+  for _ in $(seq 1 15); do
+    if docker compose -f "$BASE/compose.yaml" --env-file "$ENV" exec -T bot python -m app.cli health --telegram >/tmp/vps-bill-health.log 2>&1; then
+      PASS=1
+      break
+    fi
+    sleep 2
+  done
+
+  if [[ $PASS -ne 1 ]]; then
+    cat /tmp/vps-bill-health.log >&2 || true
+    err "Не удалось подключиться к Telegram через SOCKS5. Логи: docker logs vps-bill"
+    exit 1
+  fi
+
+  cat /tmp/vps-bill-health.log
+else
+  ok "SOCKS5 не задан — используется прямое подключение к Telegram"
 fi
-cat /tmp/vps-bill-health.log
 
 ln -sfn "$BASE/current/scripts/update.sh" /usr/local/bin/vps-bill-update
 ln -sfn "$BASE/current/scripts/backup.sh" /usr/local/bin/vps-bill-backup
