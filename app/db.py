@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .default_emojis import DEFAULT_CUSTOM_EMOJIS
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 SCHEMA = r'''
 PRAGMA foreign_keys=ON;
@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS servers (
   purpose TEXT NOT NULL DEFAULT '',
   tags TEXT NOT NULL DEFAULT '',
   deleted_at TEXT,
+  archived_at TEXT,
   monitor_enabled INTEGER NOT NULL DEFAULT 0,
   billing_mode TEXT NOT NULL DEFAULT 'scheduled',
   balance_minor INTEGER NOT NULL DEFAULT 0,
@@ -112,6 +113,11 @@ CREATE TABLE IF NOT EXISTS currency_settings (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS provider_settings (
+  provider TEXT PRIMARY KEY COLLATE NOCASE,
+  cabinet_url TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
 '''
 
 DEFAULT_SETTINGS = {
@@ -120,6 +126,7 @@ DEFAULT_SETTINGS = {
     "monthly_report_enabled": "1",
     "report_day": "1",
     "report_hour": "10",
+    "report_minute": "0",
     "billing_cycles": "weekly,monthly,quarterly,yearly",
     "monitoring_enabled": "0",
     "monitor_interval": "180",
@@ -128,6 +135,17 @@ DEFAULT_SETTINGS = {
     "monitor_timeout": "3",
     "monitor_method": "auto",
     "monitor_tcp_port": "22",
+    "payment_reminder_time": "10:00",
+    "auto_update_enabled": "0",
+    "auto_update_manifest_url": "",
+    "update_check_enabled": "1",
+    "update_last_check_day": "",
+    "update_last_offered": "",
+    "update_remind_after": "",
+    "update_ignored_version": "",
+    "update_result_notified": "",
+    "backup_keep_days": "30",
+    "backup_keep_count": "30",
 }
 
 
@@ -165,6 +183,7 @@ class Database:
                 "purpose": "TEXT NOT NULL DEFAULT ''",
                 "tags": "TEXT NOT NULL DEFAULT ''",
                 "deleted_at": "TEXT",
+                "archived_at": "TEXT",
                 "monitor_enabled": "INTEGER NOT NULL DEFAULT 0",
                 "billing_mode": "TEXT NOT NULL DEFAULT 'scheduled'",
                 "balance_minor": "INTEGER NOT NULL DEFAULT 0",
@@ -234,14 +253,14 @@ class Database:
             return int(cur.lastrowid)
 
     def list_servers(self, active_only: bool = True) -> list[dict]:
-        q = "SELECT * FROM servers" + (" WHERE active=1 AND deleted_at IS NULL" if active_only else "") + " ORDER BY date(next_due), lower(name)"
+        q = "SELECT * FROM servers" + (" WHERE active=1 AND deleted_at IS NULL AND archived_at IS NULL" if active_only else "") + " ORDER BY date(next_due), lower(name)"
         with self.conn() as c:
             return [dict(r) for r in c.execute(q).fetchall()]
 
     def list_providers(self) -> list[str]:
         with self.conn() as c:
             rows = c.execute(
-                "SELECT provider, COUNT(*) AS n FROM servers WHERE active=1 AND deleted_at IS NULL AND trim(provider)<>'' GROUP BY provider ORDER BY n DESC, lower(provider)"
+                "SELECT provider, COUNT(*) AS n FROM servers WHERE active=1 AND deleted_at IS NULL AND archived_at IS NULL AND trim(provider)<>'' GROUP BY provider ORDER BY n DESC, lower(provider)"
             ).fetchall()
         return [str(r["provider"]) for r in rows]
 
@@ -338,12 +357,34 @@ class Database:
 
     def trash_server(self, server_id: int) -> None:
         with self.conn() as c:
-            c.execute("UPDATE servers SET active=0, deleted_at=?, updated_at=? WHERE id=?", (now_iso(), now_iso(), server_id))
+            c.execute("UPDATE servers SET active=0, archived_at=NULL, deleted_at=?, updated_at=? WHERE id=?", (now_iso(), now_iso(), server_id))
             c.execute("DELETE FROM snoozes WHERE server_id=?", (server_id,))
 
     def restore_server(self, server_id: int) -> None:
         with self.conn() as c:
-            c.execute("UPDATE servers SET active=1, deleted_at=NULL, updated_at=? WHERE id=?", (now_iso(), server_id))
+            c.execute("UPDATE servers SET active=1, deleted_at=NULL, archived_at=NULL, updated_at=? WHERE id=?", (now_iso(), server_id))
+
+    def archive_server(self, server_id: int) -> None:
+        with self.conn() as c:
+            c.execute("UPDATE servers SET active=0, archived_at=?, deleted_at=NULL, monitor_enabled=0, updated_at=? WHERE id=?", (now_iso(), now_iso(), server_id))
+            c.execute("DELETE FROM snoozes WHERE server_id=?", (server_id,))
+
+    def restore_archived_server(self, server_id: int) -> None:
+        with self.conn() as c:
+            c.execute("UPDATE servers SET active=1, archived_at=NULL, updated_at=? WHERE id=?", (now_iso(), server_id))
+
+    def list_archive(self) -> list[dict]:
+        with self.conn() as c:
+            rows = c.execute("SELECT * FROM servers WHERE archived_at IS NOT NULL AND deleted_at IS NULL ORDER BY datetime(archived_at) DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def archive_count(self) -> int:
+        with self.conn() as c:
+            return int(c.execute("SELECT COUNT(*) FROM servers WHERE archived_at IS NOT NULL AND deleted_at IS NULL").fetchone()[0])
+
+    def archive_to_trash(self, server_id: int) -> None:
+        with self.conn() as c:
+            c.execute("UPDATE servers SET active=0, archived_at=NULL, deleted_at=?, updated_at=? WHERE id=?", (now_iso(), now_iso(), server_id))
 
     def purge_server(self, server_id: int) -> None:
         with self.conn() as c:
@@ -559,6 +600,143 @@ class Database:
         except ValueError:
             return 10
 
+    def report_minute(self) -> int:
+        try:
+            return max(0, min(59, int(self.get_setting("report_minute", "0"))))
+        except ValueError:
+            return 0
+
+    def set_report_time(self, value: str) -> None:
+        raw = str(value or "").strip()
+        try:
+            hh, mm = raw.split(":", 1)
+            hour = int(hh); minute = int(mm)
+        except Exception as exc:
+            raise ValueError("Время должно быть в формате ЧЧ:ММ") from exc
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError("Время должно быть в формате ЧЧ:ММ")
+        self.set_setting("report_hour", str(hour))
+        self.set_setting("report_minute", str(minute))
+
+
+
+    def payment_reminder_time(self) -> str:
+        raw = str(self.get_setting("payment_reminder_time", "10:00") or "10:00").strip()
+        try:
+            hh, mm = raw.split(":", 1)
+            hour = max(0, min(23, int(hh)))
+            minute = max(0, min(59, int(mm)))
+            return f"{hour:02d}:{minute:02d}"
+        except Exception:
+            return "10:00"
+
+    def set_payment_reminder_time(self, value: str) -> None:
+        raw = str(value or "").strip()
+        try:
+            hh, mm = raw.split(":", 1)
+            hour = int(hh); minute = int(mm)
+        except Exception as exc:
+            raise ValueError("Время должно быть в формате ЧЧ:ММ") from exc
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError("Время должно быть в формате ЧЧ:ММ")
+        self.set_setting("payment_reminder_time", f"{hour:02d}:{minute:02d}")
+
+    def auto_update_enabled(self) -> bool:
+        return self.get_setting("auto_update_enabled", "0") == "1"
+
+    def set_auto_update_enabled(self, enabled: bool) -> None:
+        self.set_setting("auto_update_enabled", "1" if enabled else "0")
+
+    def auto_update_manifest_url(self) -> str:
+        return str(self.get_setting("auto_update_manifest_url", "") or "").strip()
+
+    def set_auto_update_manifest_url(self, value: str) -> None:
+        self.set_setting("auto_update_manifest_url", str(value or "").strip())
+
+    def update_check_enabled(self) -> bool:
+        return self.get_setting("update_check_enabled", "1") == "1"
+
+    def set_update_check_enabled(self, enabled: bool) -> None:
+        self.set_setting("update_check_enabled", "1" if enabled else "0")
+
+    def update_last_check_day(self) -> str:
+        return str(self.get_setting("update_last_check_day", "") or "")
+
+    def set_update_last_check_day(self, value: str) -> None:
+        self.set_setting("update_last_check_day", str(value or ""))
+
+    def update_last_offered(self) -> str:
+        return str(self.get_setting("update_last_offered", "") or "")
+
+    def set_update_last_offered(self, value: str) -> None:
+        self.set_setting("update_last_offered", str(value or ""))
+
+    def update_remind_after(self) -> str:
+        return str(self.get_setting("update_remind_after", "") or "")
+
+    def set_update_remind_after(self, value: str) -> None:
+        self.set_setting("update_remind_after", str(value or ""))
+
+    def update_ignored_version(self) -> str:
+        return str(self.get_setting("update_ignored_version", "") or "")
+
+    def set_update_ignored_version(self, value: str) -> None:
+        self.set_setting("update_ignored_version", str(value or ""))
+
+    def update_result_notified(self) -> str:
+        return str(self.get_setting("update_result_notified", "") or "")
+
+    def set_update_result_notified(self, value: str) -> None:
+        self.set_setting("update_result_notified", str(value or ""))
+
+    def backup_keep_days(self) -> int:
+        try: return max(1, min(3650, int(self.get_setting("backup_keep_days", "30"))))
+        except ValueError: return 30
+
+    def backup_keep_count(self) -> int:
+        try: return max(3, min(500, int(self.get_setting("backup_keep_count", "30"))))
+        except ValueError: return 30
+
+    def provider_url(self, provider: str) -> str:
+        name = " ".join(str(provider or "").strip().split())
+        if not name:
+            return ""
+        with self.conn() as c:
+            row = c.execute("SELECT cabinet_url FROM provider_settings WHERE provider=? COLLATE NOCASE", (name,)).fetchone()
+        return str(row["cabinet_url"] or "") if row else ""
+
+    @staticmethod
+    def normalize_provider_url(url: str) -> str:
+        value = str(url or "").strip()
+        if not value:
+            return ""
+        if value.startswith("@"):
+            username = value[1:].strip()
+            if not username or any(ch.isspace() for ch in username):
+                raise ValueError("Некорректное имя Telegram-бота")
+            return f"https://t.me/{username}"
+        if value.startswith("t.me/"):
+            value = "https://" + value
+        elif value.startswith("telegram.me/"):
+            value = "https://" + value
+        if value.startswith(("https://", "http://")):
+            return value
+        raise ValueError("Укажи https://сайт, t.me/бота или @имя_бота")
+
+    def set_provider_url(self, provider: str, url: str) -> None:
+        name = " ".join(str(provider or "").strip().split())
+        if not name:
+            raise ValueError("Хостер не указан")
+        value = self.normalize_provider_url(url)
+        with self.conn() as c:
+            if value:
+                c.execute(
+                    "INSERT INTO provider_settings(provider,cabinet_url,updated_at) VALUES(?,?,?) "
+                    "ON CONFLICT(provider) DO UPDATE SET cabinet_url=excluded.cabinet_url, updated_at=excluded.updated_at",
+                    (name, value, now_iso()),
+                )
+            else:
+                c.execute("DELETE FROM provider_settings WHERE provider=? COLLATE NOCASE", (name,))
 
     def monitoring_enabled(self) -> bool:
         return self.get_setting("monitoring_enabled", "0") == "1"
@@ -616,6 +794,17 @@ class Database:
                 "UPDATE servers SET provider=?, updated_at=? WHERE lower(trim(provider))=lower(trim(?))",
                 (new, datetime.now(timezone.utc).isoformat(), old),
             )
+            link = c.execute("SELECT cabinet_url FROM provider_settings WHERE provider=? COLLATE NOCASE", (old,)).fetchone()
+            target_link = c.execute("SELECT cabinet_url FROM provider_settings WHERE provider=? COLLATE NOCASE", (new,)).fetchone()
+            if link:
+                c.execute("DELETE FROM provider_settings WHERE provider=? COLLATE NOCASE", (old,))
+                # If the target provider already has its own LK URL, preserve it.
+                if not target_link or not str(target_link["cabinet_url"] or "").strip():
+                    c.execute(
+                        "INSERT INTO provider_settings(provider,cabinet_url,updated_at) VALUES(?,?,?) "
+                        "ON CONFLICT(provider) DO UPDATE SET cabinet_url=excluded.cabinet_url, updated_at=excluded.updated_at",
+                        (new, str(link["cabinet_url"] or ""), now_iso()),
+                    )
             c.commit()
             return int(cur.rowcount or 0)
 

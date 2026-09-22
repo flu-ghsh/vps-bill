@@ -8,11 +8,13 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from . import __version__
 from .billing import days_until, money, sum_by_currency
 from .config import Settings
 from .db import Database
 from .monitoring import probe_host
-from .ui import e, h, notification_buttons
+from .ui import e, h, notification_buttons, update_offer_keyboard
+from .updates import is_newer, latest_release, read_update_status
 
 
 class Notifier:
@@ -24,6 +26,7 @@ class Notifier:
         self._stopping = asyncio.Event()
         self._last_monitor_run = 0.0
         self._monitor_parallel = 10
+        self._last_update_attempt = 0.0
 
     async def stop(self):
         self._stopping.set()
@@ -113,6 +116,10 @@ class Notifier:
             self.db.clear_snooze(s["id"])
 
     async def check_due(self, now: datetime):
+        reminder_time = self.db.payment_reminder_time()
+        hh, mm = (int(x) for x in reminder_time.split(":", 1))
+        if (now.hour, now.minute) < (hh, mm):
+            return
         today = now.date()
         reminder_days = set(self.db.get_reminder_days())
         overdue_daily = self.db.overdue_daily()
@@ -172,7 +179,9 @@ class Notifier:
                 pass
 
     async def monthly_report(self, now: datetime):
-        if not self.db.monthly_report_enabled() or now.day != self.db.report_day() or now.hour < self.db.report_hour():
+        if not self.db.monthly_report_enabled() or now.day != self.db.report_day():
+            return
+        if (now.hour, now.minute) < (self.db.report_hour(), self.db.report_minute()):
             return
         key = f"monthly:{now.year}-{now.month:02d}"
         if self.db.event_exists(key) or self.db.outbox_exists(key):
@@ -191,6 +200,92 @@ class Notifier:
             lines.append("• 0")
         lines += ["", f"Активных серверов: <b>{len(self.db.list_servers())}</b>"]
         self.db.enqueue_outbox(key, "monthly", "\n".join(lines))
+
+    def _update_check_target(self, now: datetime) -> datetime:
+        hh, mm = (int(x) for x in self.db.payment_reminder_time().split(":", 1))
+        reminder = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        target = reminder - timedelta(minutes=30)
+        if target.date() < now.date():
+            target += timedelta(days=1)
+        return target
+
+    async def check_update_result(self, now: datetime):
+        status = read_update_status(self.settings.update_requests_dir)
+        if not status or status.get("state") not in {"success", "error"}:
+            return
+        request_id = str(status.get("request_id") or "")
+        if not request_id or self.db.update_result_notified() == request_id:
+            return
+        version = str(status.get("version") or "?")
+        if status.get("state") == "success":
+            text = (
+                "✅ <b>VPS Bill обновлён</b>\n\n"
+                f"Установлена версия: <b>{h(version)}</b>\n"
+                "Backup, миграция и health-check завершены успешно."
+            )
+        else:
+            error = str(status.get("error") or "неизвестная ошибка")
+            text = (
+                f"{e(self.db.get_emojis(), 'warning')} <b>Обновление не выполнено</b>\n\n"
+                f"Версия: <b>{h(version)}</b>\n"
+                f"Ошибка: <code>{h(error[:500])}</code>\n\n"
+                "Текущая рабочая версия сохранена или восстановлена штатным rollback."
+            )
+        ok, _ = await self._broadcast(text)
+        if ok:
+            self.db.set_update_result_notified(request_id)
+
+    async def check_updates(self, now: datetime):
+        await self.check_update_result(now)
+        if not self.db.update_check_enabled():
+            return
+        target = self._update_check_target(now)
+        if now < target:
+            return
+        day_key = target.date().isoformat()
+        if self.db.update_last_check_day() == day_key:
+            return
+        current_mono = time.monotonic()
+        if current_mono - self._last_update_attempt < 1800:
+            return
+        self._last_update_attempt = current_mono
+        try:
+            rel = await latest_release()
+        except Exception as exc:
+            print(f"update check failed: {exc}", flush=True)
+            return
+        self.db.set_update_last_check_day(day_key)
+        if not is_newer(rel.version, __version__):
+            return
+        if self.db.update_ignored_version() == rel.version:
+            return
+        remind_after = self.db.update_remind_after()
+        if remind_after:
+            try:
+                if date.fromisoformat(remind_after) > now.date():
+                    return
+            except ValueError:
+                pass
+        elif self.db.update_last_offered() == rel.version:
+            return
+        notes = str(rel.notes or "").strip()
+        if len(notes) > 1800:
+            notes = notes[:1800].rstrip() + "…"
+        if not notes:
+            notes = "Изменения не указаны."
+        asset_note = "" if rel.asset_url else "\n\n⚠️ В релизе пока нет установочного архива."
+        text = (
+            "⬆️ <b>Доступна новая версия VPS Bill</b>\n\n"
+            f"Установлена: <b>{h(__version__)}</b>\n"
+            f"Доступна: <b>{h(rel.version)}</b>\n\n"
+            "<b>Что изменилось:</b>\n"
+            f"{h(notes)}{asset_note}"
+        )
+        markup = update_offer_keyboard(rel.version) if rel.asset_url else None
+        ok, _ = await self._broadcast(text, markup)
+        if ok:
+            self.db.set_update_last_offered(rel.version)
+            self.db.set_update_remind_after("")
 
     async def _probe(self, s: dict) -> tuple[bool, dict[str, str]]:
         return await probe_host(
@@ -275,6 +370,7 @@ class Notifier:
                 ("due", self.check_due),
                 ("balances", self.check_balances),
                 ("monthly", self.monthly_report),
+                ("updates", self.check_updates),
                 ("monitoring", self.check_availability),
             ):
                 await self._run_step(name, fn, now)

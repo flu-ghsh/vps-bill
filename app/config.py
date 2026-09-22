@@ -75,6 +75,7 @@ class Settings:
     db_path: Path
     backups_dir: Path
     update_manifest_url: str | None
+    update_requests_dir: Path
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -87,4 +88,5 @@ class Settings:
             db_path=Path(_env_value("DB_PATH", "/app/data/billing.db")),
             backups_dir=Path(_env_value("BACKUPS_DIR", "/app/backups")),
             update_manifest_url=_env_value("UPDATE_MANIFEST_URL") or None,
+            update_requests_dir=Path("/app/update-requests"),
         )

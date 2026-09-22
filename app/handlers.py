@@ -15,6 +15,7 @@ from .backup_archive import create_backup_archive
 from .billing import annual_equivalent_minor, money, monthly_equivalent_minor, next_due, parse_amount_minor, sum_by_currency
 from .config import Settings
 from .db import Database
+from .updates import create_update_request, is_newer, latest_release
 from .ui import (
     EMOJI_SLOTS,
     back_main,
@@ -48,8 +49,12 @@ from .ui import (
     server_details_keyboard,
     trash_item_keyboard,
     trash_list_keyboard,
+    archive_list_keyboard,
+    archive_item_keyboard,
     backups_keyboard,
     settings_keyboard,
+    update_confirm_keyboard,
+    update_settings_keyboard,
 )
 
 
@@ -94,8 +99,53 @@ class MonitorTcpPort(StatesGroup):
     waiting = State()
 
 
+class ReminderTimeInput(StatesGroup):
+    waiting = State()
+
+
+class ReportDayInput(StatesGroup):
+    waiting = State()
+
+
+class ReportTimeInput(StatesGroup):
+    waiting = State()
+
+
+class ProviderUrlInput(StatesGroup):
+    waiting = State()
+
+
 def kb(rows):
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def compact_money(amount_minor: int, currency: str) -> str:
+    value = f"{int(amount_minor) / 100:.2f}".rstrip("0").rstrip(".")
+    symbols = {"RUB": "₽", "USD": "$", "EUR": "€"}
+    code = str(currency or "").upper()
+    return f"{value}{symbols.get(code, code)}"
+
+
+def day_word(value: int) -> str:
+    n = abs(int(value))
+    if 11 <= n % 100 <= 14:
+        return "дней"
+    if n % 10 == 1:
+        return "день"
+    if n % 10 in (2, 3, 4):
+        return "дня"
+    return "дней"
+
+
+def relative_due(days: int) -> str:
+    if days < 0:
+        n = abs(days)
+        return f"просрочено на {n} {day_word(n)}"
+    if days == 0:
+        return "сегодня"
+    if days == 1:
+        return "завтра"
+    return f"через {days} {day_word(days)}"
 
 
 class BotHandlers:
@@ -175,7 +225,8 @@ class BotHandlers:
         r.callback_query.register(self._show_main_cb, F.data == "main")
 
         r.callback_query.register(self.servers, (F.data == "servers") | F.data.startswith("servers:page:"))
-        r.callback_query.register(self.server, F.data.startswith("server:"))
+        r.callback_query.register(self.server, F.data.startswith("srvopen:"))
+        r.callback_query.register(self.server, F.data.startswith("server:"))  # legacy callbacks from old messages
         r.callback_query.register(self.upcoming, F.data == "upcoming")
         r.callback_query.register(self.payments, F.data == "payments")
         r.callback_query.register(self.analytics, F.data == "analytics")
@@ -193,6 +244,8 @@ class BotHandlers:
         r.callback_query.register(self.reminder_toggle, F.data.startswith("rem:toggle:"))
         r.callback_query.register(self.reminder_overdue_toggle, F.data == "rem:overdue")
         r.callback_query.register(self.reminder_default, F.data == "rem:default")
+        r.callback_query.register(self.reminder_time_set, F.data.startswith("rem:time:"))
+        r.message.register(self.reminder_time_input, ReminderTimeInput.waiting)
         r.callback_query.register(self.reports_page, F.data == "settings:reports")
         r.callback_query.register(self.monitoring_page, F.data == "settings:monitoring")
         r.callback_query.register(self.monitor_global_toggle, F.data == "monitor:global")
@@ -207,9 +260,12 @@ class BotHandlers:
         r.callback_query.register(self.monitor_server_toggle, F.data.startswith("monitor:server:"))
         r.callback_query.register(self.report_toggle, F.data == "report:toggle")
         r.callback_query.register(self.report_day, F.data.startswith("report:day:"))
-        r.callback_query.register(self.report_hour, F.data.startswith("report:hour:"))
-        r.callback_query.register(self.emojis_page, F.data == "settings:emojis")
-        r.callback_query.register(self.emoji_resetall_ask, F.data == "emoji:resetall")
+        r.message.register(self.report_day_input, ReportDayInput.waiting)
+        r.callback_query.register(self.report_time, F.data.startswith("report:time:"))
+        r.message.register(self.report_time_input, ReportTimeInput.waiting)
+        r.callback_query.register(self.report_default, F.data == "report:default")
+        r.callback_query.register(self.emojis_page, (F.data == "settings:emojis") | F.data.startswith("emoji:page:"))
+        r.callback_query.register(self.emoji_resetall_ask, (F.data == "emoji:resetall") | F.data.startswith("emoji:resetall:p:"))
         r.callback_query.register(self.emoji_resetall_yes, F.data == "emoji:resetall:yes")
         r.callback_query.register(self.emoji_reset, F.data.startswith("emoji:reset:"))
         r.callback_query.register(self.emoji_cancel, F.data == "emoji:cancel")
@@ -217,11 +273,20 @@ class BotHandlers:
         r.message.register(self.emoji_input, EmojiEdit.waiting)
         r.callback_query.register(self.backups_page, F.data == "settings:backups")
         r.callback_query.register(self.backup, F.data.in_({"backup", "backup:create"}))
+        r.callback_query.register(self.backup_cleanup, F.data == "backup:cleanup")
+        r.callback_query.register(self.update_page, F.data == "settings:update")
+        r.callback_query.register(self.update_check, F.data == "update:check")
+        r.callback_query.register(self.update_install, F.data.startswith("update:install:"))
+        r.callback_query.register(self.update_confirm, F.data.startswith("update:confirm:"))
+        r.callback_query.register(self.update_tomorrow, F.data.startswith("update:tomorrow:"))
+        r.callback_query.register(self.update_ignore, F.data.startswith("update:ignore:"))
         r.callback_query.register(self.dictionaries_page, F.data == "settings:dictionaries")
         r.callback_query.register(self.dictionary_list, F.data.in_({"dict:provider", "dict:country", "dict:tag"}))
         r.callback_query.register(self.dictionary_item, F.data.startswith("dict:item:"))
         r.callback_query.register(self.dictionary_rename_start, F.data.startswith("dict:rename:"))
         r.message.register(self.dictionary_rename_input, DictionaryRename.waiting)
+        r.callback_query.register(self.provider_url_start, F.data.startswith("dict:url:"))
+        r.message.register(self.provider_url_input, ProviderUrlInput.waiting)
 
         r.callback_query.register(self.paid, F.data.startswith("paid:"))
         r.callback_query.register(self.balance_topup_start, F.data.startswith("balance:topup:"))
@@ -235,6 +300,12 @@ class BotHandlers:
         r.callback_query.register(self.tag_new, F.data.startswith("tag:new:"))
         r.callback_query.register(self.edit_server_field, F.data.startswith("editfield:"))
         r.message.register(self.edit_server_field_input, EditServerField.waiting)
+        r.callback_query.register(self.archive_page, (F.data == "archive") | F.data.startswith("archive:page:"))
+        r.callback_query.register(self.archive_item, F.data.startswith("archiveitem:"))
+        r.callback_query.register(self.archive_ask, F.data.startswith("archiveask:"))
+        r.callback_query.register(self.archive_yes, F.data.startswith("archiveyes:"))
+        r.callback_query.register(self.archive_restore, F.data.startswith("archiverestore:"))
+        r.callback_query.register(self.archive_to_trash, F.data.startswith("archivetotrash:"))
         r.callback_query.register(self.trash_page, (F.data == "trash") | F.data.startswith("trash:page:"))
         r.callback_query.register(self.trash_item, F.data.startswith("trashitem:"))
         r.callback_query.register(self.trash_ask, F.data.startswith("trashask:"))
@@ -309,10 +380,13 @@ class BotHandlers:
             else:
                 label = f"{server['name']} · {date.fromisoformat(server['next_due']).strftime('%d.%m.%y')}"
                 style = "success"
-            rows.append([button(emojis, "server", label, f"server:{server['id']}", style=style)])
+            rows.append([button(emojis, "server", label, f"srvopen:{server['id']}", style=style)])
         nav = pagination_row(emojis, page, total_pages, "servers:page")
         if nav:
             rows.append(nav)
+        archive_n = self.db.archive_count()
+        archive_label = f"Архив · {archive_n}" if archive_n else "Архив"
+        rows.append([button(emojis, "server", archive_label, "archive")])
         trash_n = self.db.trash_count()
         if trash_n:
             rows.append([button(emojis, "trash", f"Корзина · {trash_n}", "trash")])
@@ -328,13 +402,25 @@ class BotHandlers:
         await q.message.edit_text(text, reply_markup=kb(rows))
 
     async def server(self, q: CallbackQuery):
-        await q.answer()
-        sid = int(q.data.split(":", 1)[1])
+        data = str(q.data or "")
+        try:
+            sid = int(data.split(":", 1)[1])
+        except (IndexError, ValueError):
+            return await q.answer("Некорректная карточка сервера", show_alert=True)
         s = self.db.get_server(sid)
         emojis = self.emojis
         if not s:
-            return await q.message.edit_text("Сервер не найден.", reply_markup=back_main(emojis))
-        await q.message.edit_text(server_card(s, emojis), reply_markup=server_buttons(sid, emojis, balance_mode=str(s.get("billing_mode") or "") == "balance"))
+            await q.answer("Сервер не найден", show_alert=True)
+            return
+        try:
+            await q.message.edit_text(
+                server_card(s, emojis),
+                reply_markup=server_buttons(sid, emojis, balance_mode=str(s.get("billing_mode") or "") == "balance"),
+            )
+            await q.answer()
+        except Exception as exc:
+            print(f"server card open failed sid={sid}: {exc!r}", flush=True)
+            await q.answer("Не удалось открыть карточку. Ошибка записана в лог.", show_alert=True)
 
     async def upcoming(self, q: CallbackQuery):
         await q.answer()
@@ -343,11 +429,23 @@ class BotHandlers:
         lines = [f"{e(emojis, 'calendar')} <b>Ближайшие оплаты</b>", ""]
         for s in items[:30]:
             d = (date.fromisoformat(s["next_due"]) - self.today).days
-            tag = f"через {d} дн." if d >= 0 else f"просрочено {abs(d)} дн."
-            lines.append(f"• <b>{h(s['name'])}</b> - {money(s['amount_minor'], s['currency'])} · {date.fromisoformat(s['next_due']).strftime('%d.%m.%y')} · {tag}")
+            provider = str(s.get("provider") or "").strip()
+            provider_url = self.db.provider_url(provider) if provider else ""
+            if provider:
+                if provider_url:
+                    provider_text = f'<a href="{h(provider_url)}">{h(provider)}</a> {e(emojis, "cabinet")}'
+                else:
+                    provider_text = h(provider)
+                lines.append(f"<b>{h(s['name'])}</b> - {provider_text}")
+            else:
+                lines.append(f"<b>{h(s['name'])}</b>")
+            lines.append(
+                f"↳ · {h(relative_due(d))} · {date.fromisoformat(s['next_due']).strftime('%d.%m.%Y')} · {h(compact_money(s['amount_minor'], s['currency']))} ·"
+            )
+            lines.append("")
         if len(lines) == 2:
             lines.append("На ближайшие 30 дней оплат нет.")
-        await q.message.edit_text("\n".join(lines), reply_markup=back_main(emojis))
+        await q.message.edit_text("\n".join(lines).rstrip(), reply_markup=back_main(emojis), disable_web_page_preview=True)
 
     async def payments(self, q: CallbackQuery):
         await q.answer()
@@ -378,18 +476,24 @@ class BotHandlers:
         od = sum_by_currency(overdue)
         monthly: dict[str, int] = {"RUB": 0, "EUR": 0, "USD": 0}
         annual: dict[str, int] = {"RUB": 0, "EUR": 0, "USD": 0}
-        providers: dict[str, int] = {}
+        providers: dict[str, dict] = {}
         tag_set: set[str] = set()
         for srv in servers:
             cur = srv["currency"].upper()
-            monthly[cur] = monthly.get(cur, 0) + monthly_equivalent_minor(srv["amount_minor"], srv["cycle"], srv.get("cycle_days"))
-            annual[cur] = annual.get(cur, 0) + annual_equivalent_minor(srv["amount_minor"], srv["cycle"], srv.get("cycle_days"))
-            provider = srv["provider"] or "Без хостера"
-            providers[provider] = providers.get(provider, 0) + 1
+            monthly_value = monthly_equivalent_minor(srv["amount_minor"], srv["cycle"], srv.get("cycle_days"))
+            annual_value = annual_equivalent_minor(srv["amount_minor"], srv["cycle"], srv.get("cycle_days"))
+            monthly[cur] = monthly.get(cur, 0) + monthly_value
+            annual[cur] = annual.get(cur, 0) + annual_value
+            provider = str(srv.get("provider") or "Без хостера")
+            item = providers.setdefault(provider, {"count": 0, "monthly": {}})
+            item["count"] += 1
+            item["monthly"][cur] = item["monthly"].get(cur, 0) + monthly_value
             tag_set.update(x.strip().casefold() for x in str(srv.get("tags") or "").split(",") if x.strip())
 
         def money_lines(values: dict[str, int]) -> list[str]:
             rows = [f"  {money(values[c], c)}" for c in ("RUB", "EUR", "USD") if values.get(c)]
+            extras = [c for c in sorted(values) if c not in {"RUB", "EUR", "USD"} and values.get(c)]
+            rows.extend(f"  {money(values[c], c)}" for c in extras)
             return rows or ["  0"]
 
         lines = [
@@ -414,12 +518,20 @@ class BotHandlers:
         if overdue:
             lines += ["", f"{e(emojis, 'status_overdue')} <b>Просрочено</b>", *money_lines(od)]
         if providers:
-            lines += ["", "<b>Хостеры</b>"]
-            max_count = max(providers.values())
-            for name, count in sorted(providers.items(), key=lambda x: (-x[1], x[0].casefold()))[:8]:
-                blocks = max(1, round(6 * count / max_count))
-                lines.append(f"{h(name)}  {'█' * blocks}{'░' * (6 - blocks)}  {count}")
-        await q.message.edit_text("\n".join(lines), reply_markup=back_main(emojis))
+            lines += ["", f"{e(emojis, 'provider')} <b>Хостеры</b>"]
+            ranked = sorted(providers.items(), key=lambda x: (-int(x[1]["count"]), x[0].casefold()))[:8]
+            for name, info in ranked:
+                provider_text = h(name)
+                totals = []
+                for cur in ("RUB", "EUR", "USD"):
+                    if info["monthly"].get(cur):
+                        totals.append(f"{compact_money(info['monthly'][cur], cur)}/мес.")
+                for cur in sorted(info["monthly"]):
+                    if cur not in {"RUB", "EUR", "USD"} and info["monthly"].get(cur):
+                        totals.append(f"{compact_money(info['monthly'][cur], cur)}/мес.")
+                suffix = " · ".join(totals) if totals else "0/мес."
+                lines.append(f"{provider_text}\n↳ {info['count']} VPS · {h(suffix)}")
+        await q.message.edit_text("\n".join(lines), reply_markup=back_main(emojis), disable_web_page_preview=True)
 
     async def settings_page(self, q: CallbackQuery):
         await q.answer()
@@ -435,7 +547,7 @@ class BotHandlers:
             f"{e(emojis, 'settings')} <b>Настройки</b>\n\n"
             f"База: <b>{'OK' if dbi['integrity'] == 'ok' else h(dbi['integrity'])}</b>\n"
             f"Напоминания: <b>{h(reminder_text)}</b>\n"
-            f"Периоды оплаты: <b>{h(cycle_text)}</b>\n"
+            f"Периоды: <b>{h(cycle_text)}</b>\n"
             f"Версия бота: <b>{h(__version__)}</b>"
         )
         await q.message.edit_text(text, reply_markup=settings_keyboard(emojis))
@@ -482,9 +594,14 @@ class BotHandlers:
         if idx < 0 or idx >= len(items):
             return await q.answer("Список изменился. Открой его заново.", show_alert=True)
         value = items[idx]
+        provider_url = self.db.provider_url(value) if kind == "provider" else ""
+        extra = ""
+        if kind == "provider":
+            extra = f"\nСсылка на ЛК: {'<a href="' + h(provider_url) + '">открыть</a>' if provider_url else '<b>не задана</b>'}"
         await q.message.edit_text(
-            f"<b>{h(self._dictionary_title(kind))}</b>\n\nТекущее значение: <b>{h(value)}</b>",
-            reply_markup=dictionary_edit_keyboard(kind, idx, self.emojis),
+            f"<b>{h(self._dictionary_title(kind))}</b>\n\nТекущее значение: <b>{h(value)}</b>{extra}",
+            reply_markup=dictionary_edit_keyboard(kind, idx, self.emojis, provider_url),
+            disable_web_page_preview=True,
         )
 
     async def dictionary_rename_start(self, q: CallbackQuery, state: FSMContext):
@@ -531,6 +648,46 @@ class BotHandlers:
             reply_markup=dictionaries_keyboard(self.emojis),
         )
 
+    async def provider_url_start(self, q: CallbackQuery, state: FSMContext):
+        await q.answer()
+        try:
+            idx = int(q.data.rsplit(":", 1)[1])
+        except ValueError:
+            return await q.answer("Хостер не найден", show_alert=True)
+        items = self.db.list_providers()
+        if idx < 0 or idx >= len(items):
+            return await q.answer("Список изменился. Открой его заново.", show_alert=True)
+        provider = items[idx]
+        current = self.db.provider_url(provider)
+        await state.update_data(provider_url_name=provider)
+        await state.set_state(ProviderUrlInput.waiting)
+        current_text = f'<a href="{h(current)}">{h(current)}</a>' if current else "не задана"
+        await q.message.edit_text(
+            f"{e(self.emojis, 'provider')} <b>{h(provider)}</b>\n\n"
+            f"Ссылка на личный кабинет: {current_text}\n\n"
+            "Отправьте сайт, <code>t.me/имя</code> или <code>@имя_бота</code>.\n"
+            "Для очистки поля отправьте: -",
+            reply_markup=cancel_keyboard(self.emojis),
+            disable_web_page_preview=True,
+        )
+
+    async def provider_url_input(self, m: Message, state: FSMContext):
+        data = await state.get_data()
+        provider = str(data.get("provider_url_name") or "")
+        value = str(m.text or "").strip()
+        if value == "-":
+            value = ""
+        try:
+            self.db.set_provider_url(provider, value)
+        except ValueError as exc:
+            return await m.answer(f"{e(self.emojis, 'warning')} {h(exc)}", reply_markup=cancel_keyboard(self.emojis))
+        await state.clear()
+        url_text = "удалена" if not value else "сохранена"
+        await m.answer(
+            f"{e(self.emojis, 'paid')} Ссылка на ЛК для <b>{h(provider)}</b> {url_text}.",
+            reply_markup=dictionaries_keyboard(self.emojis),
+        )
+
     async def billing_cycles_page(self, q: CallbackQuery):
         await q.answer()
         emojis = self.emojis
@@ -545,7 +702,7 @@ class BotHandlers:
         }
         labels = [labels_map[x] for x in enabled if x in labels_map]
         text = (
-            f"{e(emojis, 'cycle')} <b>Периоды оплаты</b>\n\n"
+            f"{e(emojis, 'cycle')} <b>Периоды</b>\n\n"
             "Выбери галочками, какие сроки показывать при создании VPS. "
             "Изменения применяются сразу.\n\n"
             f"Сейчас: <b>{h(', '.join(labels))}</b>"
@@ -624,13 +781,15 @@ class BotHandlers:
         emojis = self.emojis
         days = self.db.get_reminder_days()
         labels = ["в день оплаты" if d == 0 else f"за {d} дн." for d in days]
+        reminder_time = self.db.payment_reminder_time()
         text = (
             f"{e(emojis, 'reminders')} <b>Напоминания</b>\n\n"
             "Нажимай варианты - изменения применяются сразу.\n\n"
             f"Сейчас: <b>{h(', '.join(labels) or 'выключены')}</b>\n"
+            f"Время уведомления: <b>{h(reminder_time)}</b>\n"
             f"Просрочка ежедневно: <b>{'да' if self.db.overdue_daily() else 'нет'}</b>"
         )
-        await q.message.edit_text(text, reply_markup=reminder_keyboard(days, self.db.overdue_daily(), emojis))
+        await q.message.edit_text(text, reply_markup=reminder_keyboard(days, self.db.overdue_daily(), reminder_time, emojis))
 
     async def reminder_toggle(self, q: CallbackQuery):
         d = int(q.data.rsplit(":", 1)[1])
@@ -649,7 +808,38 @@ class BotHandlers:
     async def reminder_default(self, q: CallbackQuery):
         self.db.set_reminder_days((7, 3, 1, 0))
         self.db.set_setting("overdue_daily", "1")
+        self.db.set_payment_reminder_time("10:00")
         await self.reminders_page(q)
+
+    async def reminder_time_set(self, q: CallbackQuery, state: FSMContext):
+        suffix = q.data.rsplit(":", 1)[1]
+        if suffix == "manual":
+            await q.answer()
+            await state.set_state(ReminderTimeInput.waiting)
+            return await q.message.edit_text(
+                f"{e(self.emojis, 'reminders')} <b>Время уведомления</b>\n\n"
+                "Введите время в формате <code>ЧЧ:ММ</code>, например <code>10:30</code>.",
+                reply_markup=cancel_keyboard(self.emojis),
+            )
+        if len(suffix) != 4 or not suffix.isdigit():
+            return await q.answer("Некорректное время", show_alert=True)
+        value = f"{suffix[:2]}:{suffix[2:]}"
+        try:
+            self.db.set_payment_reminder_time(value)
+        except ValueError as exc:
+            return await q.answer(str(exc), show_alert=True)
+        await self.reminders_page(q)
+
+    async def reminder_time_input(self, m: Message, state: FSMContext):
+        try:
+            self.db.set_payment_reminder_time(str(m.text or "").strip())
+        except ValueError as exc:
+            return await m.answer(f"{e(self.emojis, 'warning')} {h(exc)}", reply_markup=cancel_keyboard(self.emojis))
+        await state.clear()
+        await m.answer(
+            f"{e(self.emojis, 'paid')} Время уведомлений: <b>{h(self.db.payment_reminder_time())}</b>",
+            reply_markup=reminder_keyboard(self.db.get_reminder_days(), self.db.overdue_daily(), self.db.payment_reminder_time(), self.emojis),
+        )
 
     async def reports_page(self, q: CallbackQuery):
         await q.answer()
@@ -657,32 +847,91 @@ class BotHandlers:
         enabled = self.db.monthly_report_enabled()
         day = self.db.report_day()
         hour = self.db.report_hour()
+        minute = self.db.report_minute()
         text = (
-            f"{e(emojis, 'reports')} <b>Отчёты</b>\n\n"
+            f"{e(emojis, 'reports')} <b>Отчёт</b>\n\n"
             f"Месячный отчёт: <b>{'включён' if enabled else 'выключен'}</b>\n"
-            f"Когда придёт: <b>{day}-го числа в {hour:02d}:00</b>\n\n"
-            "Сначала выбери день месяца (1–28), ниже - время отправки."
+            f"Когда придёт: <b>{day}-го числа в {hour:02d}:{minute:02d}</b>\n\n"
+            "Выбери готовый вариант или введи день/время вручную."
         )
-        await q.message.edit_text(text, reply_markup=reports_keyboard(enabled, day, hour, emojis))
+        await q.message.edit_text(text, reply_markup=reports_keyboard(enabled, day, hour, minute, emojis))
 
     async def report_toggle(self, q: CallbackQuery):
         self.db.set_setting("monthly_report_enabled", "0" if self.db.monthly_report_enabled() else "1")
         await self.reports_page(q)
 
-    async def report_day(self, q: CallbackQuery):
-        day = int(q.data.rsplit(":", 1)[1])
+    async def report_day(self, q: CallbackQuery, state: FSMContext):
+        suffix = q.data.rsplit(":", 1)[1]
+        if suffix == "manual":
+            await q.answer()
+            await state.set_state(ReportDayInput.waiting)
+            return await q.message.edit_text(
+                f"{e(self.emojis, 'reports')} <b>День отчёта</b>\n\nВведите число от <b>1</b> до <b>28</b>.",
+                reply_markup=cancel_keyboard(self.emojis),
+            )
+        day = int(suffix)
         self.db.set_setting("report_day", str(max(1, min(28, day))))
         await self.reports_page(q)
 
-    async def report_hour(self, q: CallbackQuery):
-        hour = int(q.data.rsplit(":", 1)[1])
-        self.db.set_setting("report_hour", str(max(0, min(23, hour))))
+    async def report_day_input(self, m: Message, state: FSMContext):
+        try:
+            day = int(str(m.text or "").strip())
+        except ValueError:
+            return await m.answer("Введите число от 1 до 28.", reply_markup=cancel_keyboard(self.emojis))
+        if not 1 <= day <= 28:
+            return await m.answer("Введите число от 1 до 28.", reply_markup=cancel_keyboard(self.emojis))
+        self.db.set_setting("report_day", str(day))
+        await state.clear()
+        await m.answer(
+            f"{e(self.emojis, 'paid')} День отчёта: <b>{day}</b>",
+            reply_markup=reports_keyboard(self.db.monthly_report_enabled(), day, self.db.report_hour(), self.db.report_minute(), self.emojis),
+        )
+
+    async def report_time(self, q: CallbackQuery, state: FSMContext):
+        suffix = q.data.rsplit(":", 1)[1]
+        if suffix == "manual":
+            await q.answer()
+            await state.set_state(ReportTimeInput.waiting)
+            return await q.message.edit_text(
+                f"{e(self.emojis, 'reports')} <b>Время отчёта</b>\n\nВведите время в формате <code>ЧЧ:ММ</code>.",
+                reply_markup=cancel_keyboard(self.emojis),
+            )
+        if len(suffix) != 4 or not suffix.isdigit():
+            return await q.answer("Некорректное время", show_alert=True)
+        value = f"{suffix[:2]}:{suffix[2:]}"
+        try:
+            self.db.set_report_time(value)
+        except ValueError as exc:
+            return await q.answer(str(exc), show_alert=True)
+        await self.reports_page(q)
+
+    async def report_time_input(self, m: Message, state: FSMContext):
+        try:
+            self.db.set_report_time(str(m.text or "").strip())
+        except ValueError as exc:
+            return await m.answer(f"{e(self.emojis, 'warning')} {h(exc)}", reply_markup=cancel_keyboard(self.emojis))
+        await state.clear()
+        await m.answer(
+            f"{e(self.emojis, 'paid')} Время отчёта: <b>{self.db.report_hour():02d}:{self.db.report_minute():02d}</b>",
+            reply_markup=reports_keyboard(self.db.monthly_report_enabled(), self.db.report_day(), self.db.report_hour(), self.db.report_minute(), self.emojis),
+        )
+
+    async def report_default(self, q: CallbackQuery):
+        self.db.set_setting("monthly_report_enabled", "1")
+        self.db.set_setting("report_day", "1")
+        self.db.set_report_time("10:00")
         await self.reports_page(q)
 
     async def emojis_page(self, q: CallbackQuery, state: FSMContext | None = None):
         if state:
             await state.clear()
         await q.answer()
+        page = 0
+        if q.data and str(q.data).startswith("emoji:page:"):
+            try:
+                page = int(str(q.data).rsplit(":", 1)[1])
+            except ValueError:
+                page = 0
         emojis = self.emojis
         text = (
             f"{e(emojis, 'emoji')} <b>Premium emoji</b>\n\n"
@@ -690,15 +939,22 @@ class BotHandlers:
             "ID сохранится в базе и применится сразу, без рестарта.\n\n"
             "Если слот не переопределён - используется штатный premium emoji VPS Bill (если он задан), иначе Unicode."
         )
-        await q.message.edit_text(text, reply_markup=emoji_keyboard(emojis))
+        await q.message.edit_text(text, reply_markup=emoji_keyboard(emojis, page))
 
     async def emoji_edit(self, q: CallbackQuery, state: FSMContext):
-        slot = q.data.split(":", 2)[2]
+        parts = str(q.data or "").split(":")
+        slot = parts[2] if len(parts) > 2 else ""
+        page = 0
+        if len(parts) >= 5 and parts[3] == "p":
+            try:
+                page = int(parts[4])
+            except ValueError:
+                page = 0
         if slot not in EMOJI_SLOTS:
             return await q.answer("Неизвестный слот", show_alert=True)
         await q.answer()
         await state.set_state(EmojiEdit.waiting)
-        await state.update_data(emoji_slot=slot)
+        await state.update_data(emoji_slot=slot, emoji_page=page)
         emojis = self.emojis
         fallback, label = EMOJI_SLOTS[slot]
         current = emojis.get(slot)
@@ -708,12 +964,13 @@ class BotHandlers:
             f"Сейчас: {current_text}\n\n"
             "Отправь <b>один custom/premium emoji</b> следующим сообщением. "
             "Можно также прислать его numeric custom emoji ID.",
-            reply_markup=emoji_edit_keyboard(slot, emojis),
+            reply_markup=emoji_edit_keyboard(slot, emojis, page),
         )
 
     async def emoji_input(self, m: Message, state: FSMContext):
         data = await state.get_data()
         slot = data.get("emoji_slot")
+        page = int(data.get("emoji_page") or 0)
         if slot not in EMOJI_SLOTS:
             await state.clear()
             return await m.answer("Сессия настройки устарела. Открой Настройки → Справочники → Эмодзи ещё раз.")
@@ -728,7 +985,7 @@ class BotHandlers:
         if not emoji_id:
             return await m.answer(
                 f"{e(self.emojis, 'warning')} Не вижу custom emoji. Отправь именно premium/custom emoji или его numeric ID.",
-                reply_markup=emoji_edit_keyboard(slot, self.emojis),
+                reply_markup=emoji_edit_keyboard(slot, self.emojis, page),
             )
 
         try:
@@ -738,7 +995,7 @@ class BotHandlers:
         except Exception as exc:
             return await m.answer(
                 f"{e(self.emojis, 'warning')} Не удалось проверить этот custom emoji: <code>{h(str(exc)[:200])}</code>",
-                reply_markup=emoji_edit_keyboard(slot, self.emojis),
+                reply_markup=emoji_edit_keyboard(slot, self.emojis, page),
             )
 
         self.db.set_emoji(slot, emoji_id)
@@ -746,40 +1003,63 @@ class BotHandlers:
         emojis = self.emojis
         await m.answer(
             f"{e(emojis, 'paid')} <b>Эмодзи сохранён</b>\n\nИзменение применено сразу.",
-            reply_markup=emoji_keyboard(emojis),
+            reply_markup=emoji_keyboard(emojis, page),
         )
 
     async def emoji_reset(self, q: CallbackQuery, state: FSMContext):
-        slot = q.data.split(":", 2)[2]
+        parts = str(q.data or "").split(":")
+        slot = parts[2] if len(parts) > 2 else ""
+        page = 0
+        if len(parts) >= 5 and parts[3] == "p":
+            try:
+                page = int(parts[4])
+            except ValueError:
+                page = 0
         if slot in EMOJI_SLOTS:
             self.db.set_emoji(slot, "")
         await state.clear()
         await q.answer("Сброшено")
         emojis = self.emojis
-        await q.message.edit_text("🎨 <b>Premium emoji</b>\n\nДля слота восстановлен emoji VPS Bill по умолчанию.", reply_markup=emoji_keyboard(emojis))
+        await q.message.edit_text("🎨 <b>Premium emoji</b>\n\nДля слота восстановлен emoji VPS Bill по умолчанию.", reply_markup=emoji_keyboard(emojis, page))
 
     async def emoji_cancel(self, q: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        page = int(data.get("emoji_page") or 0)
         await state.clear()
         await q.answer("Отменено")
         emojis = self.emojis
-        await q.message.edit_text(f"{e(emojis, 'emoji')} <b>Premium emoji</b>", reply_markup=emoji_keyboard(emojis))
+        await q.message.edit_text(f"{e(emojis, 'emoji')} <b>Premium emoji</b>", reply_markup=emoji_keyboard(emojis, page))
 
     async def emoji_resetall_ask(self, q: CallbackQuery):
         await q.answer()
+        page = 0
+        parts = str(q.data or "").split(":")
+        if len(parts) >= 4 and parts[2] == "p":
+            try:
+                page = int(parts[3])
+            except ValueError:
+                page = 0
         emojis = self.emojis
         await q.message.edit_text(
             f"{e(emojis, 'warning')} <b>Сбросить все premium emoji?</b>\n\nВернётся штатный набор emoji VPS Bill по умолчанию.",
             reply_markup=kb([
-                [button(emojis, "delete", "Да, сбросить все", "emoji:resetall:yes", style="danger")],
+                [button(emojis, "delete", "Да, сбросить все", f"emoji:resetall:yes:p:{page}", style="danger")],
                 [button(emojis, "cancel", "Отмена", "settings:emojis", style="danger")],
             ]),
         )
 
     async def emoji_resetall_yes(self, q: CallbackQuery):
+        parts = str(q.data or "").split(":")
+        page = 0
+        if len(parts) >= 5 and parts[3] == "p":
+            try:
+                page = int(parts[4])
+            except ValueError:
+                page = 0
         self.db.clear_all_emojis()
         await q.answer("Восстановлен набор по умолчанию")
         emojis = self.emojis
-        await q.message.edit_text("🎨 <b>Premium emoji</b>\n\nВосстановлен штатный набор VPS Bill.", reply_markup=emoji_keyboard(emojis))
+        await q.message.edit_text("🎨 <b>Premium emoji</b>\n\nВосстановлен штатный набор VPS Bill.", reply_markup=emoji_keyboard(emojis, page))
 
     async def monitoring_page(self, q: CallbackQuery):
         await q.answer()
@@ -916,6 +1196,129 @@ class BotHandlers:
         lines.append(f"{e(self.emojis, 'monitor')} Мониторинг: <b>{'ВКЛ' if enabled else 'ВЫКЛ'}</b>")
         await q.message.edit_text("\n".join(lines), reply_markup=server_details_keyboard(sid, self.emojis, has_ip=True, has_country=bool(str(server.get("country") or "").strip()), has_tags=bool(str(server.get("tags") or "").strip()), has_notes=bool(str(server.get("notes") or "").strip()), monitor_enabled=enabled))
 
+    def _cleanup_old_backups(self) -> tuple[int,int]:
+        files=[p for p in self.settings.backups_dir.iterdir() if p.is_file() and p.name.startswith("vps-bill-") and (p.suffix==".db" or p.name.endswith(".tar.gz"))]
+        files.sort(key=lambda p:p.stat().st_mtime, reverse=True)
+        cutoff=datetime.now().timestamp()-self.db.backup_keep_days()*86400
+        keep=self.db.backup_keep_count(); removed=0
+        for idx,p in enumerate(files):
+            if idx>=keep or p.stat().st_mtime<cutoff:
+                try: p.unlink(); removed+=1
+                except FileNotFoundError: pass
+        return removed, max(0,len(files)-removed)
+
+    async def backup_cleanup(self, q: CallbackQuery):
+        removed,left=self._cleanup_old_backups(); await q.answer(f"Удалено: {removed}")
+        await q.message.edit_text(f"{e(self.emojis,'backup')} <b>Бекап</b>\n\nСтарые копии очищены.\nУдалено: <b>{removed}</b>\nОсталось: <b>{left}</b>\nПолитика: {self.db.backup_keep_days()} дней / максимум {self.db.backup_keep_count()} файлов.", reply_markup=backups_keyboard(self.emojis))
+
+    def _update_check_clock(self) -> str:
+        hh, mm = (int(x) for x in self.db.payment_reminder_time().split(":", 1))
+        base = datetime(2000, 1, 1, hh, mm) - timedelta(minutes=30)
+        return base.strftime("%H:%M")
+
+    @staticmethod
+    def _release_notes_text(notes: str, limit: int = 2200) -> str:
+        value = str(notes or "").strip()
+        if not value:
+            return "Изменения не указаны."
+        if len(value) > limit:
+            value = value[:limit].rstrip() + "…"
+        return h(value)
+
+    async def update_page(self, q: CallbackQuery):
+        await q.answer()
+        latest = None
+        error = ""
+        try:
+            rel = await latest_release()
+            if is_newer(rel.version, __version__):
+                latest = rel.version
+        except Exception as exc:
+            error = str(exc)
+        lines = [
+            f"{e(self.emojis, 'update')} <b>Обновление</b>",
+            "",
+            f"Установлена: <b>{h(__version__)}</b>",
+            f"Проверка: <b>ежедневно в {h(self._update_check_clock())}</b>",
+            "Источник: <b>GitHub Releases</b>",
+        ]
+        if latest:
+            lines += ["", f"Доступна: <b>{h(latest)}</b>"]
+        elif error:
+            lines += ["", f"Проверка сейчас не удалась: <code>{h(error[:180])}</code>"]
+        else:
+            lines += ["", "Установлена актуальная версия."]
+        await q.message.edit_text("\n".join(lines), reply_markup=update_settings_keyboard(self.emojis, latest))
+
+    async def update_check(self, q: CallbackQuery):
+        await self.update_page(q)
+
+    async def update_install(self, q: CallbackQuery):
+        version = q.data.rsplit(":", 1)[1]
+        await q.answer()
+        try:
+            rel = await latest_release()
+        except Exception as exc:
+            return await q.message.edit_text(
+                f"{e(self.emojis, 'warning')} Не удалось проверить GitHub: <code>{h(str(exc)[:250])}</code>",
+                reply_markup=update_settings_keyboard(self.emojis),
+            )
+        if rel.version != version or not is_newer(version, __version__):
+            return await q.message.edit_text(
+                "Версия уже не актуальна. Проверь обновления ещё раз.",
+                reply_markup=update_settings_keyboard(self.emojis),
+            )
+        if not rel.asset_url:
+            return await q.message.edit_text(
+                f"В GitHub Release нет архива <code>vps-bill-{h(version)}.tar.gz</code>.",
+                reply_markup=update_settings_keyboard(self.emojis),
+            )
+        text = (
+            f"{e(self.emojis, 'update')} <b>Обновление VPS Bill</b>\n\n"
+            f"{h(__version__)} → <b>{h(version)}</b>\n\n"
+            "<b>Что изменилось:</b>\n"
+            f"{self._release_notes_text(rel.notes)}\n\n"
+            "Перед обновлением будет создан backup, миграция сначала проверится на копии БД. "
+            "При ошибке штатный updater выполнит rollback."
+        )
+        await q.message.edit_text(text, reply_markup=update_confirm_keyboard(version), disable_web_page_preview=True)
+
+    async def update_confirm(self, q: CallbackQuery):
+        version = q.data.rsplit(":", 1)[1]
+        await q.answer()
+        try:
+            rel = await latest_release()
+            if rel.version != version or not is_newer(version, __version__) or not rel.asset_url:
+                raise RuntimeError("релиз уже не является актуальным")
+            request_id = create_update_request(self.settings.update_requests_dir, version)
+        except Exception as exc:
+            return await q.message.edit_text(
+                f"{e(self.emojis, 'warning')} <b>Не удалось запустить обновление</b>\n\n<code>{h(str(exc))}</code>",
+                reply_markup=update_settings_keyboard(self.emojis),
+            )
+        await q.message.edit_text(
+            f"{e(self.emojis, 'update')} <b>Обновление запущено</b>\n\n"
+            f"Версия: <b>{h(__version__)} → {h(version)}</b>\n"
+            f"Заявка: <code>{h(request_id)}</code>\n\n"
+            "Host-side updater скачает релиз с GitHub, создаст backup, проверит миграцию и перезапустит VPS Bill. "
+            "После завершения бот сообщит результат.",
+        )
+
+    async def update_tomorrow(self, q: CallbackQuery):
+        version = q.data.rsplit(":", 1)[1]
+        tomorrow = (self.today + timedelta(days=1)).isoformat()
+        self.db.set_update_last_offered(version)
+        self.db.set_update_remind_after(tomorrow)
+        await q.answer("Напомню завтра")
+        await q.message.edit_reply_markup(reply_markup=None)
+
+    async def update_ignore(self, q: CallbackQuery):
+        version = q.data.rsplit(":", 1)[1]
+        self.db.set_update_ignored_version(version)
+        self.db.set_update_remind_after("")
+        await q.answer("Эта версия больше не будет предлагаться")
+        await q.message.edit_reply_markup(reply_markup=None)
+
     async def backups_page(self, q: CallbackQuery):
         await q.answer()
         self.settings.backups_dir.mkdir(parents=True, exist_ok=True)
@@ -923,7 +1326,7 @@ class BotHandlers:
         legacy = sorted(self.settings.backups_dir.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
         files = archives[:5] if archives else legacy[:5]
         lines = [
-            f"{e(self.emojis, 'backup')} <b>Резервные копии</b>",
+            f"{e(self.emojis, 'backup')} <b>Бекап</b>",
             "",
             f"Архивов: <b>{len(archives)}</b>",
         ]
@@ -943,6 +1346,7 @@ class BotHandlers:
         emojis = self.emojis
         try:
             raw, archive, _ = await self._create_and_send_backup(q.bot, q.from_user.id)
+            self._cleanup_old_backups()
             await q.message.edit_text(
                 f"{e(emojis, 'backup')} <b>Backup готов</b>\n\n"
                 f"Архив отправлен вам в Telegram.\n"
@@ -1149,6 +1553,36 @@ class BotHandlers:
             reply_markup=server_buttons(sid, self.emojis, balance_mode=str(server.get("billing_mode") or "") == "balance"),
         )
 
+    async def archive_ask(self, q: CallbackQuery):
+        await q.answer()
+        sid=int(q.data.split(":",1)[1]); srv=self.db.get_server(sid)
+        if not srv: return
+        await q.message.edit_text(f"📦 <b>Переместить в архив?</b>\n\n{h(srv['name'])}\n\nИстория платежей сохранится в аналитике.", reply_markup=kb([[button(self.emojis,"server","В архив",f"archiveyes:{sid}",style="success")],[button(self.emojis,"cancel","Отмена",f"srvopen:{sid}")]]))
+
+    async def archive_yes(self, q: CallbackQuery):
+        sid=int(q.data.split(":",1)[1]); self.db.archive_server(sid); await q.answer("Перемещено в архив")
+        items=self.db.list_archive(); await q.message.edit_text(f"📦 <b>Архив</b>\n\nСерверов: <b>{len(items)}</b>", reply_markup=archive_list_keyboard(items,self.emojis))
+
+    async def archive_page(self, q: CallbackQuery):
+        await q.answer(); items=self.db.list_archive(); page=0
+        if q.data and q.data.startswith("archive:page:"):
+            try: page=int(q.data.rsplit(":",1)[1])
+            except ValueError: page=0
+        await q.message.edit_text(f"📦 <b>Архив VPS</b>\n\nСерверов: <b>{len(items)}</b>\nИстория оплат сохранена и продолжает учитываться в фактических расходах.", reply_markup=archive_list_keyboard(items,self.emojis,page=page))
+
+    async def archive_item(self, q: CallbackQuery):
+        await q.answer(); sid=int(q.data.split(":",1)[1]); srv=self.db.get_server(sid)
+        if not srv: return await self.archive_page(q)
+        await q.message.edit_text(server_card(srv,self.emojis), reply_markup=archive_item_keyboard(sid,self.emojis))
+
+    async def archive_restore(self, q: CallbackQuery):
+        sid=int(q.data.split(":",1)[1]); self.db.restore_archived_server(sid); await q.answer("Возвращён в активные")
+        await q.message.edit_text(server_card(self.db.get_server(sid),self.emojis), reply_markup=server_buttons(sid,self.emojis,balance_mode=str(self.db.get_server(sid).get("billing_mode") or "")=="balance"))
+
+    async def archive_to_trash(self, q: CallbackQuery):
+        sid=int(q.data.split(":",1)[1]); self.db.archive_to_trash(sid); await q.answer("Перемещено в корзину")
+        items=self.db.list_archive(); await q.message.edit_text(f"📦 <b>Архив VPS</b>\n\nСерверов: <b>{len(items)}</b>", reply_markup=archive_list_keyboard(items,self.emojis))
+
     async def trash_ask(self, q: CallbackQuery):
         sid = int(q.data.split(":", 1)[1])
         server = self.db.get_server(sid)
@@ -1160,7 +1594,7 @@ class BotHandlers:
             f"<b>{h(server['name'])}</b> перестанет участвовать в напоминаниях и аналитике. История оплат сохранится.",
             reply_markup=kb([
                 [button(self.emojis, "trash", "В корзину", f"trashyes:{sid}", style="danger")],
-                [button(self.emojis, "cancel", "Отмена", f"server:{sid}", style="primary")],
+                [button(self.emojis, "cancel", "Отмена", f"srvopen:{sid}", style="primary")],
             ]),
         )
 
@@ -1513,7 +1947,7 @@ class BotHandlers:
         await q.message.edit_text(
             f"{e(self.emojis, 'paid')} <b>VPS добавлен</b>\n\n" + server_card(s, self.emojis) + suffix + monitor_hint,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [button(self.emojis, "back", "К карточке", f"server:{sid}")],
+                [button(self.emojis, "back", "К карточке", f"srvopen:{sid}")],
             ]),
         )
 

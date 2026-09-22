@@ -17,19 +17,21 @@ EMOJI_SLOTS: dict[str, tuple[str, str]] = {
     "add": ("➕", "Добавить"),
     "calendar": ("📅", "Календарь"),
     "settings": ("⚙️", "Настройки"),
+    "update": ("⬆️", "Обновление"),
     "paid": ("✅", "Оплачено"),
     "snooze": ("⏰", "Напомнить"),
     "delete": ("🗑", "Удалить"),
     "cancel": ("❌", "Отмена"),
     "back": ("⬅️", "Назад"),
     "provider": ("🏢", "Хостер"),
+    "cabinet": ("↗️", "Переход в ЛК"),
     "backup": ("💾", "Backup"),
     "warning": ("⚠️", "Предупреждение"),
     "money": ("💸", "Оплата"),
     "reminders": ("🔔", "Напоминания"),
-    "reports": ("📈", "Отчёты"),
+    "reports": ("📈", "Отчёт"),
     "emoji": ("🎨", "Эмодзи"),
-    "cycle": ("🔁", "Периоды оплаты"),
+    "cycle": ("🔁", "Периоды"),
     "currency_rub": ("₽", "RUB"),
     "currency_eur": ("€", "EUR"),
     "currency_usd": ("$", "USD"),
@@ -152,6 +154,7 @@ def server_buttons(server_id: int, emojis: dict[str, str], *, balance_mode: bool
         ])
     if balance_mode:
         rows.append([button(emojis, "edit", "Данные", f"details:{server_id}")])
+    rows.append([button(emojis, "server", "В архив", f"archiveask:{server_id}")])
     rows.append([button(emojis, "trash", "В корзину", f"trashask:{server_id}", style="danger")])
     rows.append([button(emojis, "back", "К серверам", "servers")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -168,7 +171,7 @@ def server_details_keyboard(server_id: int, emojis: dict[str, str], *, has_ip: b
     ]
     if has_ip:
         rows.append([button(emojis, "monitor", f"Мониторинг: {'ВКЛ' if monitor_enabled else 'ВЫКЛ'}", f"monitor:server:{server_id}", style="success" if monitor_enabled else None)])
-    rows.append([button(emojis, "back", "К карточке", f"server:{server_id}")])
+    rows.append([button(emojis, "back", "К карточке", f"srvopen:{server_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def country_picker_keyboard(server_id: int, countries: list[str], emojis: dict[str, str]) -> InlineKeyboardMarkup:
@@ -310,7 +313,27 @@ def trash_item_keyboard(server_id: int, emojis: dict[str, str]) -> InlineKeyboar
 def backups_keyboard(emojis: dict[str, str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [button(emojis, "backup", "Создать и прислать backup", "backup:create", style="success")],
+        [button(emojis, "trash", "Очистить старые backup", "backup:cleanup")],
         [button(emojis, "back", "К настройкам", "settings")],
+    ])
+
+
+def archive_list_keyboard(items: list[dict], emojis: dict[str, str], *, page: int = 0, page_size: int = 8) -> InlineKeyboardMarkup:
+    total_pages = max(1, (len(items) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    rows=[]
+    for item in items[page*page_size:page*page_size+page_size]:
+        rows.append([button(emojis, "server", item["name"], f"archiveitem:{item['id']}")])
+    nav=pagination_row(emojis,page,total_pages,"archive:page")
+    if nav: rows.append(nav)
+    rows.append([button(emojis, "back", "К серверам", "servers")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def archive_item_keyboard(server_id: int, emojis: dict[str, str]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [button(emojis, "restore", "Вернуть в активные", f"archiverestore:{server_id}", style="success")],
+        [button(emojis, "trash", "В корзину", f"archivetotrash:{server_id}", style="danger")],
+        [button(emojis, "back", "Архив", "archive")],
     ])
 
 
@@ -320,7 +343,7 @@ def notification_buttons(server_id: int, emojis: dict[str, str], *, due_date: st
             button(emojis, "paid", "Оплатил", f"paid:{server_id}:{due_date}" if due_date else f"paid:{server_id}", style="success"),
             button(emojis, "snooze", "Напомнить завтра", f"snooze:{server_id}"),
         ],
-        [button(emojis, "server", "Открыть сервер", f"server:{server_id}")],
+        [button(emojis, "server", "Открыть сервер", f"srvopen:{server_id}")],
     ])
 
 
@@ -495,33 +518,37 @@ def dictionary_items_keyboard(kind: str, items: list[str], emojis: dict[str, str
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def dictionary_edit_keyboard(kind: str, idx: int, emojis: dict[str, str]) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [button(emojis, "edit", "Переименовать", f"dict:rename:{kind}:{idx}")],
-        [button(emojis, "back", "К списку", f"dict:{kind}")],
-    ])
+def dictionary_edit_keyboard(kind: str, idx: int, emojis: dict[str, str], provider_url: str = "") -> InlineKeyboardMarkup:
+    rows = [[button(emojis, "edit", "Переименовать", f"dict:rename:{kind}:{idx}")]]
+    if kind == "provider":
+        rows.append([button(emojis, "provider", "Ссылка на ЛК", f"dict:url:{idx}")])
+        if provider_url:
+            rows.append([InlineKeyboardButton(text="Открыть ЛК", url=provider_url)])
+    rows.append([button(emojis, "back", "К списку", f"dict:{kind}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def settings_keyboard(emojis: dict[str, str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             button(emojis, "reminders", "Напоминания", "settings:reminders"),
-            button(emojis, "cycle", "Периоды оплаты", "settings:billing_cycles"),
+            button(emojis, "cycle", "Периоды", "settings:billing_cycles"),
         ],
         [
             button(emojis, "money", "Валюты", "settings:currencies"),
-            button(emojis, "reports", "Отчёты", "settings:reports"),
+            button(emojis, "reports", "Отчёт", "settings:reports"),
         ],
         [button(emojis, "monitor", "Мониторинг", "settings:monitoring")],
         [
             button(emojis, "provider", "Справочники", "settings:dictionaries"),
-            button(emojis, "backup", "Резервные копии", "settings:backups"),
+            button(emojis, "backup", "Бекап", "settings:backups"),
         ],
+        [button(emojis, "update", "Обновление", "settings:update")],
         [button(emojis, "back", "Главное меню", "main")],
     ])
 
 
-def reminder_keyboard(reminder_days: tuple[int, ...], overdue_daily: bool, emojis: dict[str, str]) -> InlineKeyboardMarkup:
+def reminder_keyboard(reminder_days: tuple[int, ...], overdue_daily: bool, reminder_time: str, emojis: dict[str, str]) -> InlineKeyboardMarkup:
     selected = set(reminder_days)
     options = (30, 14, 7, 5, 3, 2, 1, 0)
     rows: list[list[InlineKeyboardButton]] = []
@@ -540,67 +567,100 @@ def reminder_keyboard(reminder_days: tuple[int, ...], overdue_daily: bool, emoji
         callback_data="rem:overdue",
         style="success" if overdue_daily else None,
     )])
+    preset_times = ("09:00", "10:00", "12:00", "18:00")
+    rows.append([
+        InlineKeyboardButton(
+            text=("✓ " if reminder_time == value else "") + value,
+            callback_data=f"rem:time:{value.replace(':', '')}",
+            style="success" if reminder_time == value else None,
+        ) for value in preset_times
+    ])
+    rows.append([button(emojis, "edit", "Другое время", "rem:time:manual")])
     rows.append([button(emojis, "reset", "По умолчанию", "rem:default", style="primary")])
     rows.append([button(emojis, "back", "К настройкам", "settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def reports_keyboard(enabled: bool, report_day: int, report_hour: int, emojis: dict[str, str]) -> InlineKeyboardMarkup:
+def reports_keyboard(enabled: bool, report_day: int, report_hour: int, report_minute: int, emojis: dict[str, str]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [[
         InlineKeyboardButton(
             text=f"Месячный отчёт: {'ВКЛ' if enabled else 'ВЫКЛ'}",
             callback_data="report:toggle",
-            style="success" if enabled else "danger",
+            style="success" if enabled else None,
         )
     ]]
 
-    # День месяца: 1–28, чтобы настройка была валидна для любого месяца.
-    for start in range(1, 29, 7):
-        row = []
-        for day in range(start, min(start + 7, 29)):
-            row.append(InlineKeyboardButton(
-                text=str(day),
-                callback_data=f"report:day:{day}",
-                style="success" if day == report_day else None,
-            ))
-        rows.append(row)
+    days = (1, 5, 10, 15, 20, 25, 28)
+    rows.append([
+        InlineKeyboardButton(
+            text=("✓ " if day == report_day else "") + str(day),
+            callback_data=f"report:day:{day}",
+            style="success" if day == report_day else None,
+        ) for day in days[:4]
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            text=("✓ " if day == report_day else "") + str(day),
+            callback_data=f"report:day:{day}",
+            style="success" if day == report_day else None,
+        ) for day in days[4:]
+    ])
+    rows.append([button(emojis, "edit", "Ввести день вручную", "report:day:manual")])
 
-    # Время оставляем компактным: каждый час доступен, выбранный выделен.
-    for start in range(0, 24, 6):
-        row = []
-        for hour in range(start, start + 6):
-            row.append(InlineKeyboardButton(
-                text=f"{hour:02d}",
-                callback_data=f"report:hour:{hour}",
-                style="success" if hour == report_hour else None,
-            ))
-        rows.append(row)
-
+    current_time = f"{report_hour:02d}:{report_minute:02d}"
+    times = ("09:00", "10:00", "12:00", "18:00", "21:00")
+    rows.append([
+        InlineKeyboardButton(
+            text=("✓ " if value == current_time else "") + value,
+            callback_data=f"report:time:{value.replace(':', '')}",
+            style="success" if value == current_time else None,
+        ) for value in times[:3]
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            text=("✓ " if value == current_time else "") + value,
+            callback_data=f"report:time:{value.replace(':', '')}",
+            style="success" if value == current_time else None,
+        ) for value in times[3:]
+    ])
+    rows.append([button(emojis, "edit", "Ввести время вручную", "report:time:manual")])
+    rows.append([button(emojis, "reset", "По умолчанию", "report:default", style="primary")])
     rows.append([button(emojis, "back", "К настройкам", "settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def emoji_keyboard(emojis: dict[str, str]) -> InlineKeyboardMarkup:
+def emoji_keyboard(emojis: dict[str, str], page: int = 0, page_size: int = 8) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     slots = list(EMOJI_SLOTS.items())
-    for i in range(0, len(slots), 2):
+    total_pages = max(1, (len(slots) + page_size - 1) // page_size)
+    page = max(0, min(int(page), total_pages - 1))
+    chunk = slots[page * page_size:(page + 1) * page_size]
+    for i in range(0, len(chunk), 2):
         row = []
-        for slot, (fallback, label) in slots[i:i + 2]:
+        for slot, (fallback, label) in chunk[i:i + 2]:
             current = emojis.get(slot, "")
             row.append(InlineKeyboardButton(
                 text=label if current else f"{fallback} {label}",
-                callback_data=f"emoji:edit:{slot}",
+                callback_data=f"emoji:edit:{slot}:p:{page}",
                 icon_custom_emoji_id=current or None,
             ))
         rows.append(row)
-    rows.append([button(emojis, "reset", "Сбросить все", "emoji:resetall", style="danger")])
-    rows.append([button(emojis, "back", "К настройкам", "settings")])
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="‹", callback_data=f"emoji:page:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(text="›", callback_data=f"emoji:page:{page + 1}"))
+        rows.append(nav)
+    rows.append([button(emojis, "reset", "Сбросить все", f"emoji:resetall:p:{page}", style="danger")])
+    rows.append([button(emojis, "back", "К справочникам", "settings:dictionaries")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def emoji_edit_keyboard(slot: str, emojis: dict[str, str]) -> InlineKeyboardMarkup:
+def emoji_edit_keyboard(slot: str, emojis: dict[str, str], page: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [button(emojis, "reset", "Сбросить этот эмодзи", f"emoji:reset:{slot}", style="danger")],
+        [button(emojis, "reset", "Сбросить этот эмодзи", f"emoji:reset:{slot}:p:{page}", style="danger")],
         [button(emojis, "cancel", "Отмена", "emoji:cancel", style="danger")],
     ])
 
@@ -609,6 +669,9 @@ def server_card(server: dict, emojis: dict[str, str]) -> str:
     d = days_until(server["next_due"])
     if server.get("deleted_at"):
         state = f"{e(emojis, 'trash')} в корзине"
+        when = "не участвует в напоминаниях"
+    elif server.get("archived_at"):
+        state = "📦 в архиве"
         when = "не участвует в напоминаниях"
     elif d < 0:
         state = f"{e(emojis, 'status_overdue')} <b>ПРОСРОЧЕНО</b>"
@@ -664,3 +727,27 @@ def server_card(server: dict, emojis: dict[str, str]) -> str:
     if server.get("notes"):
         lines.append(f"{e(emojis, 'notes')} {h(server['notes'])}")
     return "\n".join(lines)
+
+
+def update_settings_keyboard(emojis: dict[str, str], latest_version: str | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if latest_version:
+        rows.append([InlineKeyboardButton(text=f"Установить {latest_version}", callback_data=f"update:install:{latest_version}", style="success")])
+    rows.append([InlineKeyboardButton(text="Проверить сейчас", callback_data="update:check")])
+    rows.append([button(emojis, "back", "К настройкам", "settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def update_offer_keyboard(version: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"Установить {version}", callback_data=f"update:install:{version}", style="success")],
+        [InlineKeyboardButton(text="Напомнить завтра", callback_data=f"update:tomorrow:{version}")],
+        [InlineKeyboardButton(text="Не напоминать об этой версии", callback_data=f"update:ignore:{version}")],
+    ])
+
+
+def update_confirm_keyboard(version: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Подтвердить обновление", callback_data=f"update:confirm:{version}", style="success")],
+        [InlineKeyboardButton(text="Отмена", callback_data="settings:update", style="danger")],
+    ])
