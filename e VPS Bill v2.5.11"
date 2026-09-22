@@ -1,0 +1,26 @@
+ .env.example                         |  12 [32m+[m[31m-[m
+ VERSION                              |   2 [32m+[m[31m-[m
+ app/__init__.py                      |   2 [32m+[m[31m-[m
+ app/cli.py                           |   3 [32m+[m
+ app/config.py                        |   2 [32m+[m
+ app/db.py                            | 199 [32m+++++++++++++++[m[31m-[m
+ app/handlers.py                      | 538 [32m++++++++++++++++++++++++++++++++++++++[m[31m----[m
+ app/notifier.py                      | 100 [32m+++++++[m[31m-[m
+ app/release_notes.py                 |   8 [32m+[m
+ app/ui.py                            | 175 [32m++++++++++[m[31m----[m
+ app/updates.py                       |  98 [32m++++++++[m
+ compose.example.yaml                 |   3 [32m+[m[31m-[m
+ "e.example.yaml \\"                  | 145 [31m------------[m
+ scripts/backup.sh                    |   5 [32m+[m[31m-[m
+ scripts/install-auto-update.sh       |   3 [32m+[m
+ scripts/install-update-bridge.sh     |  43 [32m++++[m
+ scripts/make-release.sh              |   2 [32m+[m[31m-[m
+ scripts/process-update-request.sh    | 105 [32m+++++++++[m
+ scripts/update.sh                    | 401 [32m+++++++[m[31m------------------------[m
+ tests/test_handlers_registry_v258.py |  10 [32m+[m
+ tests/test_v2510.py                  |  21 [32m++[m
+ tests/test_v2511.py                  |  18 [32m++[m
+ tests/test_v254.py                   |  63 [32m+++++[m
+ tests/test_v257.py                   |  28 [32m+++[m
+ tests/test_v259.py                   |  26 [32m++[m
+ 25 files changed, 1429 insertions(+), 583 deletions(-)
