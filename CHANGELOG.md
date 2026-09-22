@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.5.15
+
+- Исправлено обновление VPS Bill из Telegram на существующих установках: каталог `update-requests` автоматически получает владельца UID/GID `10001:10001` и права на запись для контейнера.
+- Исправлен `Permission denied: /app/update-requests/.request.json.tmp`: бот больше не использует фиксированное имя временного request-файла и создаёт уникальный атомарный temp-файл.
+- `install.sh`, штатный updater и host-side update bridge теперь сами восстанавливают права каталога обновлений и удаляют только зависшие временные request-файлы.
+- Bind mount `/app/update-requests` явно помечен как writable (`rw`).
+- Добавлены regression-тесты для writable update bridge и атомарного создания `request.json`.
+
 ## 2.5.14
 
 - Release notes в Telegram теперь загружаются строго из `CHANGELOG.md` соответствующего GitHub tag.
