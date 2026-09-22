@@ -3,6 +3,8 @@ from __future__ import annotations
 # Built-in premium/custom emoji defaults for VPS Bill.
 # User overrides stored in SQLite take precedence over these values.
 DEFAULT_CUSTOM_EMOJIS: dict[str, str] = {
+    "update": "6039802767931871481",
+    "cabinet": "5884343982816759327",
     "add": "5775937998948404844",
     "analytics": "5931472654660800739",
     "back": "5875082500023258804",
