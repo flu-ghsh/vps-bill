@@ -10,7 +10,7 @@ services:
     volumes:
       - /opt/vps-bill/data:/app/data
       - /opt/vps-bill/backups:/app/backups
-      - /opt/vps-bill/update-requests:/app/update-requests
+      - /opt/vps-bill/update-requests:/app/update-requests:rw
     security_opt:
       - no-new-privileges:true
     cap_drop:
