@@ -12,6 +12,15 @@ exec 9>"$LOCK"
 flock -n 9 || { echo "Обновление уже выполняется" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || { echo "Запустите от root" >&2; exit 1; }
 [[ -f "$ENV" && -L "$BASE/current" ]] || { echo "VPS Bill не установлен" >&2; exit 1; }
+DB="$BASE/data/billing.db"
+[[ -s "$DB" ]] || { echo "КРИТИЧЕСКАЯ ОШИБКА: $DB отсутствует или пуста. Обновление остановлено." >&2; exit 1; }
+python3 - "$DB" <<'PYDBCHECK'
+import sqlite3,sys
+p=sys.argv[1]
+con=sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+r=con.execute("PRAGMA quick_check").fetchone(); con.close()
+if not r or r[0] != "ok": raise SystemExit(f"SQLite quick_check: {r[0] if r else 'no result'}")
+PYDBCHECK
 
 # Repair writable runtime directories before any new container is started.
 # This also heals installations upgraded from releases where update-requests
@@ -196,9 +205,7 @@ mkdir -p "$TARGET"
 cp -a "$SRC"/. "$TARGET"/
 chmod +x "$TARGET/scripts"/*.sh
 
-# Keep the runtime compose file in /opt/vps-bill in sync with the release.
-# Older updaters left this file behind, which could preserve stale mounts.
-cp -f "$TARGET/compose.yaml" "$BASE/compose.yaml"
+# compose.yaml is runtime symlink to current/compose.yaml; never copy over it.
 
 # Repair/update the host-side Telegram update bridge on every release.
 if [[ -x "$TARGET/scripts/install-update-bridge.sh" ]]; then
@@ -216,6 +223,20 @@ mkdir -p "$BASE/backups"
 chown 10001:10001 "$BASE/backups"
 docker compose -f "$COMPOSE" --env-file "$ENV" run --rm bot python -m app.cli backup --output "/app/backups/$BNAME" >/dev/null
 [[ -s "$BACKUP" ]] || { echo "Backup не создан" >&2; exit 1; }
+SAFETY_DIR="/opt/vps-bill-safety"
+install -d -o root -g root -m 0700 "$SAFETY_DIR"
+SAFETY_BACKUP="$SAFETY_DIR/$BNAME"
+cp -- "$BACKUP" "$SAFETY_BACKUP"
+chmod 0600 "$SAFETY_BACKUP"
+python3 - "$SAFETY_BACKUP" <<'PYSAFETY'
+import sqlite3,sys
+p=sys.argv[1]
+con=sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+r=con.execute("PRAGMA quick_check").fetchone(); con.close()
+if not r or r[0] != "ok": raise SystemExit(f"Safety backup quick_check: {r[0] if r else 'no result'}")
+PYSAFETY
+mapfile -t OLD_SAFETY < <(find "$SAFETY_DIR" -maxdepth 1 -type f -name 'vps-bill-pre-update-*.db' -printf '%T@ %p\n' | sort -nr | tail -n +11 | cut -d' ' -f2-)
+((${#OLD_SAFETY[@]}==0)) || rm -f -- "${OLD_SAFETY[@]}"
 
 echo "[3/7] Проверяю миграцию на копии базы"
 TEST="$TMP/testdb"
@@ -238,9 +259,32 @@ rollback(){
   trap - ERR
   echo "ОШИБКА: выполняю rollback $NEW -> $OLD" >&2
   docker compose -f "$COMPOSE" --env-file "$ENV" down >/dev/null 2>&1 || true
-  rm -f "$BASE/data/billing.db" "$BASE/data/billing.db-wal" "$BASE/data/billing.db-shm"
-  cp "$BACKUP" "$BASE/data/billing.db"
-  chown 10001:10001 "$BASE/data/billing.db"
+
+  RESTORE_SOURCE="$BACKUP"
+  [[ -s "$RESTORE_SOURCE" ]] || RESTORE_SOURCE="${SAFETY_BACKUP:-}"
+  [[ -s "$RESTORE_SOURCE" ]] || {
+    echo "КРИТИЧЕСКАЯ ОШИБКА: backup rollback отсутствует. Рабочая DB не удалялась." >&2
+    ln -sfn "releases/$OLD" "$BASE/current"
+    sed -i "s/^APP_VERSION=.*/APP_VERSION=$OLD/" "$ENV"
+    return 1
+  }
+
+  RESTORE_TMP="$BASE/data/.billing.rollback-${TS}.$$.db"
+  cp -- "$RESTORE_SOURCE" "$RESTORE_TMP"
+  chown 10001:10001 "$RESTORE_TMP"
+  chmod 0640 "$RESTORE_TMP"
+  python3 - "$RESTORE_TMP" <<'PYROLLBACK'
+import sqlite3,sys
+p=sys.argv[1]
+con=sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+r=con.execute("PRAGMA quick_check").fetchone(); con.close()
+if not r or r[0] != "ok": raise SystemExit(f"Rollback quick_check: {r[0] if r else 'no result'}")
+PYROLLBACK
+
+  mv -f -- "$RESTORE_TMP" "$DB"
+  rm -f -- "$DB-wal" "$DB-shm"
+  chown 10001:10001 "$DB"; chmod 0640 "$DB"
+  touch "$BASE/data/.initialized"; chown 10001:10001 "$BASE/data/.initialized"
   ln -sfn "releases/$OLD" "$BASE/current"
   sed -i "s/^APP_VERSION=.*/APP_VERSION=$OLD/" "$ENV"
   docker compose -f "$COMPOSE" --env-file "$ENV" up -d >/dev/null 2>&1 || true
@@ -265,6 +309,8 @@ for _ in $(seq 1 20); do
 done
 [[ $PASS -eq 1 ]] || { cat /tmp/vps-bill-update-health.log >&2 || true; false; }
 trap - ERR
+touch "$BASE/data/.initialized"
+chown 10001:10001 "$BASE/data/.initialized"
 cat /tmp/vps-bill-update-health.log
 
 find "$BASE/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | tail -n +5 | cut -d' ' -f2- | xargs -r rm -rf

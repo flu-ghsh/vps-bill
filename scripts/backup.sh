@@ -2,6 +2,15 @@
 set -Eeuo pipefail
 BASE=/opt/vps-bill; ENV="$BASE/.env"; COMPOSE="$BASE/compose.yaml"
 [[ -f "$ENV" ]] || { echo "Нет $ENV" >&2; exit 1; }
+DB="$BASE/data/billing.db"
+[[ -s "$DB" ]] || { echo "КРИТИЧЕСКАЯ ОШИБКА: $DB отсутствует или пуста" >&2; exit 1; }
+python3 - "$DB" <<'PYDBCHECK'
+import sqlite3,sys
+p=sys.argv[1]
+con=sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+r=con.execute("PRAGMA quick_check").fetchone(); con.close()
+if not r or r[0] != "ok": raise SystemExit(f"SQLite quick_check: {r[0] if r else 'no result'}")
+PYDBCHECK
 mkdir -p "$BASE/backups"; chown 10001:10001 "$BASE/backups"
 NAME="vps-bill-$(date +%Y%m%d-%H%M%S).db"
 docker compose -f "$COMPOSE" --env-file "$ENV" run --rm bot python -m app.cli backup --output "/app/backups/$NAME"

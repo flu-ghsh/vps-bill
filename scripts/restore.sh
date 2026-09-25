@@ -21,7 +21,9 @@ else
   SRC="${FILES[$((N-1))]}"
 fi
 
-TMP=$(mktemp -d /tmp/vps-bill-restore.XXXXXX); trap 'rm -rf "$TMP"' EXIT
+TMP=$(mktemp -d /tmp/vps-bill-restore.XXXXXX)
+RESTORE_TMP=""
+trap 'rm -rf "$TMP"; [[ -z "${RESTORE_TMP:-}" ]] || rm -f -- "$RESTORE_TMP"' EXIT
 DBSRC="$SRC"
 if [[ "$SRC" == *.tar.gz ]]; then
   tar -tzf "$SRC" | grep -qx 'billing.db' || { echo "В архиве нет billing.db" >&2; exit 1; }
@@ -48,15 +50,42 @@ read -r -p "Восстановить его? Текущая база будет 
 [[ "$YES" =~ ^[YyДд]$ ]] || exit 0
 
 TS=$(date +%Y%m%d-%H%M%S)
+DB="$BASE/data/billing.db"
 SAFETY="$BASE/backups/vps-bill-pre-restore-${TS}.db"
-mkdir -p "$BASE/backups"; chown 10001:10001 "$BASE/backups"
-docker compose -f "$COMPOSE" --env-file "$ENV" run --rm bot python -m app.cli backup --output "/app/backups/$(basename "$SAFETY")" >/dev/null
+SAFETY_DIR="/opt/vps-bill-safety"
+mkdir -p "$BASE/data" "$BASE/backups"
+chown 10001:10001 "$BASE/data" "$BASE/backups"
+install -d -o root -g root -m 0700 "$SAFETY_DIR"
+
+if [[ -s "$DB" ]]; then
+  docker compose -f "$COMPOSE" --env-file "$ENV" run --rm bot python -m app.cli backup --output "/app/backups/$(basename "$SAFETY")" >/dev/null
+  [[ -s "$SAFETY" ]] || { echo "Не удалось создать страховочную копию текущей базы" >&2; exit 1; }
+  cp -- "$SAFETY" "$SAFETY_DIR/$(basename "$SAFETY")"
+  chmod 0600 "$SAFETY_DIR/$(basename "$SAFETY")"
+else
+  echo "! Текущая база отсутствует: восстановление продолжится без pre-restore копии."
+fi
+
+RESTORE_TMP="$BASE/data/.billing.restore-${TS}.$$.db"
+cp -- "$DBSRC" "$RESTORE_TMP"
+chown 10001:10001 "$RESTORE_TMP"
+chmod 0640 "$RESTORE_TMP"
+python3 - "$RESTORE_TMP" <<'PYRESTORE'
+import sqlite3,sys
+p=sys.argv[1]
+con=sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+r=con.execute("PRAGMA quick_check").fetchone(); con.close()
+if not r or r[0] != "ok": raise SystemExit(f"Restore quick_check: {r[0] if r else 'no result'}")
+PYRESTORE
 
 docker compose -f "$COMPOSE" --env-file "$ENV" down
-rm -f "$BASE/data/billing.db" "$BASE/data/billing.db-wal" "$BASE/data/billing.db-shm"
-cp "$DBSRC" "$BASE/data/billing.db"; chown 10001:10001 "$BASE/data/billing.db"
+mv -f -- "$RESTORE_TMP" "$DB"
+RESTORE_TMP=""
+rm -f -- "$DB-wal" "$DB-shm"
+chown 10001:10001 "$DB"; chmod 0640 "$DB"
+touch "$BASE/data/.initialized"; chown 10001:10001 "$BASE/data/.initialized"
 docker compose -f "$COMPOSE" --env-file "$ENV" run --rm bot python -m app.cli migrate >/dev/null
 docker compose -f "$COMPOSE" --env-file "$ENV" run --rm bot python -m app.cli db-check >/dev/null
 docker compose -f "$COMPOSE" --env-file "$ENV" up -d
 echo "Восстановлено: $SRC"
-echo "Страховочная копия предыдущей базы: $SAFETY"
+[[ -s "$SAFETY" ]] && echo "Страховочная копия предыдущей базы: $SAFETY"

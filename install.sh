@@ -59,7 +59,15 @@ normalize_proxy(){
 [[ $EUID -eq 0 ]] || { err "Запустите от root"; exit 1; }
 
 FRESH_INSTALL=0
-[[ ! -f "$BASE/data/billing.db" ]] && FRESH_INSTALL=1
+if [[ -s "$BASE/data/billing.db" ]]; then
+  FRESH_INSTALL=0
+elif [[ -f "$ENV" || -L "$BASE/current" ]]; then
+  err "Обнаружена существующая установка VPS Bill, но $BASE/data/billing.db отсутствует или пуста."
+  err "Автоматическое создание новой пустой базы заблокировано. Сначала восстановите backup."
+  exit 1
+else
+  FRESH_INSTALL=1
+fi
 ADD_DEMO=0
 
 # Минимальные зависимости нужны ДО определения source:
@@ -353,6 +361,8 @@ docker compose \
   >/tmp/vps-bill-migrate.log
 
 cat /tmp/vps-bill-migrate.log
+touch "$BASE/data/.initialized"
+chown 10001:10001 "$BASE/data/.initialized"
 ok "База готова: $BASE/data/billing.db"
 
 if [[ "$ADD_DEMO" -eq 1 ]]; then

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -35,7 +36,15 @@ async def main() -> None:
     # Self-heal stale updater temp files before Telegram callbacks can use the
     # request directory. This also repairs hosts upgraded from old releases.
     cleanup_stale_update_temps(settings.update_requests_dir)
+    db_path = Path(settings.db_path)
+    db_marker = db_path.parent / ".initialized"
+    if db_marker.exists() and (not db_path.is_file() or db_path.stat().st_size == 0):
+        raise RuntimeError(
+            f"Рабочая база {db_path} отсутствует или пуста. "
+            "Автоматическое создание новой базы заблокировано; восстановите backup."
+        )
     db = Database(settings.db_path)
+    db_marker.touch(exist_ok=True)
     session = AiohttpSession(proxy=settings.telegram_proxy) if settings.telegram_proxy else AiohttpSession()
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML), session=session)
     dp = Dispatcher()
