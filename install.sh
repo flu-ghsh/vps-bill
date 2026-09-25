@@ -97,8 +97,11 @@ else
   CHECKSUM_URL="$RELEASE_URL.sha256"
 
   c "Скачиваю v$VERSION"
+  CACHE_BUSTER="$(date +%s)"
+
   curl -fL --retry 3 --retry-delay 2 \
-    "$RELEASE_URL" \
+    -H 'Cache-Control: no-cache' \
+    "${RELEASE_URL}?nocache=${CACHE_BUSTER}" \
     -o "$ARCHIVE" || {
       err "Не удалось скачать релиз v$VERSION"
       err "Ожидался asset:"
@@ -107,7 +110,9 @@ else
     }
 
   # Если checksum asset опубликован — проверяем. Если нет — установка всё равно возможна.
-  if curl -fL --retry 2 --retry-delay 1 "$CHECKSUM_URL" \
+  if curl -fL --retry 2 --retry-delay 1 \
+      -H 'Cache-Control: no-cache' \
+      "${CHECKSUM_URL}?nocache=${CACHE_BUSTER}" \
       -o "$TMP_BOOTSTRAP/vps-bill-$VERSION.tar.gz.sha256" 2>/dev/null; then
     (
       cd "$TMP_BOOTSTRAP"
