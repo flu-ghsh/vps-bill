@@ -58,6 +58,10 @@ normalize_proxy(){
 
 [[ $EUID -eq 0 ]] || { err "Запустите от root"; exit 1; }
 
+FRESH_INSTALL=0
+[[ ! -f "$BASE/data/billing.db" ]] && FRESH_INSTALL=1
+ADD_DEMO=0
+
 # Минимальные зависимости нужны ДО определения source:
 # при bash <(curl ...) скрипт находится в /dev/fd и рядом нет VERSION/app.
 apt-get update -qq
@@ -282,6 +286,20 @@ EOF
   ok "Конфигурация сохранена в $ENV"
 fi
 
+# Демоданные спрашиваем только на первой установке.
+if [[ "$FRESH_INSTALL" -eq 1 ]]; then
+  while true; do
+    DEMO_ANSWER=""
+    read -r -p "Добавить демо-серверы? [y/N]: " DEMO_ANSWER </dev/tty || true
+    DEMO_ANSWER="$(printf '%s' "$DEMO_ANSWER" | tr '[:upper:]' '[:lower:]')"
+    case "$DEMO_ANSWER" in
+      y|yes|д|да) ADD_DEMO=1; break ;;
+      n|no|н|нет|"") ADD_DEMO=0; break ;;
+      *) warn "Введите y или n" ;;
+    esac
+  done
+fi
+
 # Старые/устаревшие env-параметры проекта не используем.
 sed -i \
   '/^INFRA_BILLING_/d; /^REMINDER_DAYS=/d; /^MONTHLY_REPORT_ENABLED=/d; /^REPORT_HOUR=/d; /^EMOJI_.*_ID=/d' \
@@ -336,6 +354,17 @@ docker compose \
 
 cat /tmp/vps-bill-migrate.log
 ok "База готова: $BASE/data/billing.db"
+
+if [[ "$ADD_DEMO" -eq 1 ]]; then
+  c "Добавляю демо-серверы"
+  docker compose \
+    -f "$BASE/compose.yaml" \
+    --env-file "$ENV" \
+    run --rm bot python -m app.cli demo-add \
+    >/tmp/vps-bill-demo.log
+  cat /tmp/vps-bill-demo.log
+  ok "Демо-серверы добавлены"
+fi
 
 docker compose \
   -f "$BASE/compose.yaml" \
