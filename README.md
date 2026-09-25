@@ -3,89 +3,41 @@
 
 # VPS Bill
 
-Telegram-бот для учёта VPS серверов, расходов, контроль дат оплаты, оповещения в TG, мониторинг доступности серверов.
+Telegram-бот для учёта VPS, расходов, дат оплаты и мониторинга доступности.
 
 ## Возможности
 
-- учёт серверов и VPS;
-- провайдеры, страны и IP;
-- стоимость и даты оплаты;
-- история платежей;
-- заметки;
-- мониторинг;
-- аналитика;
+- учёт VPS, хостеров, стран, IP, тегов и заметок;
+- стоимость, даты оплаты и история платежей;
+- напоминания и аналитика расходов;
+- мониторинг доступности серверов;
 - backup / restore;
-- обновление через GitHub Releases.
+- обновления через GitHub Releases;
+- установка обновлений из Telegram;
+- опциональные демо-серверы при первой установке.
 
 ## Установка
-
-Одна команда:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/flu-ghsh/vps-bill/main/install.sh)
 ```
 
-Установщик запросит:
+Установщик запросит Bot Token, Telegram ID, SOCKS5 при необходимости, timezone и предложит добавить демо-серверы.
 
-- Bot Token;
-- Telegram numeric ID;
-- SOCKS5 при необходимости;
-- timezone.
-
-Если SOCKS5 оставить пустым, Telegram будет работать напрямую.
-
-После установки проект находится в:
+После установки:
 
 ```text
 /opt/vps-bill
 ```
 
-## Основные команды
-
-Статус:
-
-```bash
-docker compose -f /opt/vps-bill/compose.yaml \
-  --env-file /opt/vps-bill/.env ps
-```
-
-Логи:
+## Команды
 
 ```bash
 docker logs -f vps-bill
-```
-
-Обновление:
-
-```bash
 vps-bill-update
-```
-
-Backup:
-
-```bash
 vps-bill-backup
-```
-
-Restore:
-
-```bash
 vps-bill-restore
 ```
-
-## Обновления
-
-`vps-bill-update` проверяет последний опубликованный GitHub Release.
-
-Если доступна новая версия, updater:
-
-- скачает релиз;
-- создаст backup базы;
-- соберёт новый Docker image;
-- выполнит миграцию;
-- переключит активную версию;
-- проверит запуск;
-- при ошибке выполнит rollback.
 
 Текущая версия:
 
@@ -95,45 +47,17 @@ cat /opt/vps-bill/current/VERSION
 
 ## Данные
 
-Рабочая база:
-
 ```text
-/opt/vps-bill/data/billing.db
+База:     /opt/vps-bill/data/billing.db
+Backups:  /opt/vps-bill/backups/
+Config:   /opt/vps-bill/.env
 ```
 
-Резервные копии:
+## GitHub
 
-```text
-/opt/vps-bill/backups/
-```
+Репозиторий: https://github.com/flu-ghsh/vps-bill
 
-Конфигурация:
-
-```text
-/opt/vps-bill/.env
-```
-
-## Структура
-
-```text
-/opt/vps-bill/
-├── .env
-├── compose.yaml
-├── current -> releases/<version>
-├── data/
-├── backups/
-└── releases/
-```
-
-## GitHub Releases
-
-Стабильные версии публикуются здесь:
-
-https://github.com/flu-ghsh/vps-bill/releases
-
-Репозиторий:
-
-https://github.com/flu-ghsh/vps-bill
+Releases: https://github.com/flu-ghsh/vps-bill/releases
 
 ## Лицензия
 
