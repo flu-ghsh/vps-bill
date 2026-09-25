@@ -669,7 +669,11 @@ class BotHandlers:
         provider_url = self.db.provider_url(value) if kind == "provider" else ""
         extra = ""
         if kind == "provider":
-            extra = f"\nСсылка на ЛК: {'<a href="' + h(provider_url) + '">открыть</a>' if provider_url else '<b>не задана</b>'}"
+            if provider_url:
+                provider_link = f'<a href="{h(provider_url)}">открыть</a>'
+            else:
+                provider_link = '<b>не задана</b>'
+            extra = f"\nСсылка на ЛК: {provider_link}"
         await q.message.edit_text(
             f"<b>{h(self._dictionary_title(kind))}</b>\n\nТекущее значение: <b>{h(value)}</b>{extra}",
             reply_markup=dictionary_edit_keyboard(kind, idx, self.emojis, provider_url),

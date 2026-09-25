@@ -2,7 +2,7 @@ name: vps-bill
 
 services:
   bot:
-    image: vps-bill:${APP_VERSION:-2.5.22}
+    image: vps-bill:${APP_VERSION:-2.5.24}
     container_name: vps-bill
     restart: unless-stopped
     env_file:
