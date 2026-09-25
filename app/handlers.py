@@ -11,11 +11,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from . import __version__
-from .backup_archive import create_backup_archive
+from .backup_archive import create_backup_archive, delete_old_backup_files
 from .billing import annual_equivalent_minor, money, monthly_equivalent_minor, next_due, parse_amount_minor, sum_by_currency
 from .config import Settings
 from .db import Database
-from .updates import create_update_request, is_newer, latest_release
+from .updates import changelog_to_telegram_html, create_update_request, is_newer, latest_release
 from .ui import (
     EMOJI_SLOTS,
     back_main,
@@ -30,6 +30,8 @@ from .ui import (
     dictionaries_keyboard,
     dictionary_items_keyboard,
     dictionary_edit_keyboard,
+    dictionary_delete_confirm_keyboard,
+    demo_confirm_keyboard,
     daily_mode_keyboard,
     balance_alert_keyboard,
     cycle_keyboard,
@@ -47,6 +49,7 @@ from .ui import (
     server_buttons,
     server_card,
     server_details_keyboard,
+    server_edit_back_keyboard,
     trash_item_keyboard,
     trash_list_keyboard,
     archive_list_keyboard,
@@ -108,6 +111,10 @@ class ReportDayInput(StatesGroup):
 
 
 class ReportTimeInput(StatesGroup):
+    waiting = State()
+
+
+class ReportScheduleInput(StatesGroup):
     waiting = State()
 
 
@@ -263,10 +270,12 @@ class BotHandlers:
         r.message.register(self.report_day_input, ReportDayInput.waiting)
         r.callback_query.register(self.report_time, F.data.startswith("report:time:"))
         r.message.register(self.report_time_input, ReportTimeInput.waiting)
+        r.callback_query.register(self.report_manual, F.data == "report:manual")
+        r.message.register(self.report_manual_input, ReportScheduleInput.waiting)
         r.callback_query.register(self.report_default, F.data == "report:default")
         r.callback_query.register(self.emojis_page, (F.data == "settings:emojis") | F.data.startswith("emoji:page:"))
         r.callback_query.register(self.emoji_resetall_ask, (F.data == "emoji:resetall") | F.data.startswith("emoji:resetall:p:"))
-        r.callback_query.register(self.emoji_resetall_yes, F.data == "emoji:resetall:yes")
+        r.callback_query.register(self.emoji_resetall_yes, F.data.startswith("emoji:resetall:yes"))
         r.callback_query.register(self.emoji_reset, F.data.startswith("emoji:reset:"))
         r.callback_query.register(self.emoji_cancel, F.data == "emoji:cancel")
         r.callback_query.register(self.emoji_edit, F.data.startswith("emoji:edit:"))
@@ -281,8 +290,14 @@ class BotHandlers:
         r.callback_query.register(self.update_tomorrow, F.data.startswith("update:tomorrow:"))
         r.callback_query.register(self.update_ignore, F.data.startswith("update:ignore:"))
         r.callback_query.register(self.dictionaries_page, F.data == "settings:dictionaries")
+        r.callback_query.register(self.demo_add_ask, F.data == "demo:add:ask")
+        r.callback_query.register(self.demo_add_yes, F.data == "demo:add:yes")
+        r.callback_query.register(self.demo_remove_ask, F.data == "demo:remove:ask")
+        r.callback_query.register(self.demo_remove_yes, F.data == "demo:remove:yes")
         r.callback_query.register(self.dictionary_list, F.data.in_({"dict:provider", "dict:country", "dict:tag"}))
         r.callback_query.register(self.dictionary_item, F.data.startswith("dict:item:"))
+        r.callback_query.register(self.dictionary_delete_ask, F.data.startswith("dict:delete:ask:"))
+        r.callback_query.register(self.dictionary_delete_yes, F.data.startswith("dict:delete:yes:"))
         r.callback_query.register(self.dictionary_rename_start, F.data.startswith("dict:rename:"))
         r.message.register(self.dictionary_rename_input, DictionaryRename.waiting)
         r.callback_query.register(self.provider_url_start, F.data.startswith("dict:url:"))
@@ -298,6 +313,7 @@ class BotHandlers:
         r.callback_query.register(self.tag_choose, F.data.startswith("tag:choose:"))
         r.callback_query.register(self.tag_toggle, F.data.startswith("tag:toggle:"))
         r.callback_query.register(self.tag_new, F.data.startswith("tag:new:"))
+        r.callback_query.register(self.edit_server_back, F.data.startswith("editback:"))
         r.callback_query.register(self.edit_server_field, F.data.startswith("editfield:"))
         r.message.register(self.edit_server_field_input, EditServerField.waiting)
         r.callback_query.register(self.archive_page, (F.data == "archive") | F.data.startswith("archive:page:"))
@@ -442,6 +458,9 @@ class BotHandlers:
             lines.append(
                 f"↳ · {h(relative_due(d))} · {date.fromisoformat(s['next_due']).strftime('%d.%m.%Y')} · {h(compact_money(s['amount_minor'], s['currency']))} ·"
             )
+            note = str(s.get("notes") or "").strip()
+            if note:
+                lines.append(f"↳ {e(emojis, 'notes')} {h(note)}")
             lines.append("")
         if len(lines) == 2:
             lines.append("На ближайшие 30 дней оплат нет.")
@@ -566,12 +585,65 @@ class BotHandlers:
 
     async def dictionaries_page(self, q: CallbackQuery):
         await q.answer()
+        demo_count = self.db.demo_server_count()
         text = (
-            f"{e(self.emojis, 'settings')} <b>Справочники</b>\n\n"
+            f"{e(self.emojis, 'dictionaries')} <b>Справочники</b>\n\n"
             "Здесь можно управлять хостерами, странами, тегами и premium emoji. "
-            "Переименование справочников применяется сразу ко всем VPS."
+            "Переименование справочников применяется сразу ко всем VPS.\n\n"
+            f"Демо-серверы: <b>{demo_count}</b>"
         )
-        await q.message.edit_text(text, reply_markup=dictionaries_keyboard(self.emojis))
+        await q.message.edit_text(
+            text,
+            reply_markup=dictionaries_keyboard(self.emojis, demo_present=demo_count > 0),
+        )
+
+    async def demo_add_ask(self, q: CallbackQuery):
+        await q.answer()
+        if self.db.demo_server_count():
+            return await q.answer("Демо-серверы уже добавлены", show_alert=True)
+        text = (
+            f"{e(self.emojis, 'server')} <b>Добавить демо-серверы?</b>\n\n"
+            "Будет создано 6 полностью заполненных тестовых VPS со сроками оплаты относительно сегодняшней даты:\n"
+            "• просрочен на 5 дней\n"
+            "• сегодня\n"
+            "• завтра\n"
+            "• через 3 дня\n"
+            "• через 7 дней\n"
+            "• через 30 дней\n\n"
+            "У них будут IP, хостер, страна, теги и заметки. Мониторинг будет выключен."
+        )
+        await q.message.edit_text(text, reply_markup=demo_confirm_keyboard("add", self.emojis))
+
+    async def demo_add_yes(self, q: CallbackQuery):
+        await q.answer()
+        added = self.db.add_demo_servers(self.today)
+        await q.message.edit_text(
+            f"{e(self.emojis, 'server')} <b>Демо-серверы добавлены</b>\n\nСоздано VPS: <b>{added}</b>",
+            reply_markup=dictionaries_keyboard(self.emojis, demo_present=self.db.demo_server_count() > 0),
+        )
+
+    async def demo_remove_ask(self, q: CallbackQuery):
+        await q.answer()
+        count = self.db.demo_server_count()
+        if not count:
+            return await q.answer("Демо-серверов нет", show_alert=True)
+        ids = set(self.db.demo_server_ids())
+        names = [s["name"] for s in self.db.list_servers(active_only=False) if int(s["id"]) in ids]
+        lines = "\n".join(f"• {h(name)}" for name in names)
+        text = (
+            f"{e(self.emojis, 'warning')} <b>Удалить все демо-серверы?</b>\n\n"
+            f"Будет полностью удалено: <b>{count}</b>\n\n{lines}\n\n"
+            "Реальные VPS и их платежи не затрагиваются."
+        )
+        await q.message.edit_text(text, reply_markup=demo_confirm_keyboard("remove", self.emojis))
+
+    async def demo_remove_yes(self, q: CallbackQuery):
+        await q.answer()
+        removed = self.db.delete_demo_servers()
+        await q.message.edit_text(
+            f"{e(self.emojis, 'delete')} <b>Демо-серверы удалены</b>\n\nУдалено VPS: <b>{removed}</b>",
+            reply_markup=dictionaries_keyboard(self.emojis, demo_present=False),
+        )
 
     async def dictionary_list(self, q: CallbackQuery):
         await q.answer()
@@ -602,6 +674,66 @@ class BotHandlers:
             f"<b>{h(self._dictionary_title(kind))}</b>\n\nТекущее значение: <b>{h(value)}</b>{extra}",
             reply_markup=dictionary_edit_keyboard(kind, idx, self.emojis, provider_url),
             disable_web_page_preview=True,
+        )
+
+    async def dictionary_delete_ask(self, q: CallbackQuery):
+        await q.answer()
+        try:
+            _, _, _, kind, raw_idx = q.data.split(":", 4)
+            idx = int(raw_idx)
+        except (ValueError, IndexError):
+            return await q.answer("Элемент не найден", show_alert=True)
+        if kind not in {"country", "tag"}:
+            return await q.answer("Удаление недоступно", show_alert=True)
+        items = self._dictionary_items(kind)
+        if idx < 0 or idx >= len(items):
+            return await q.answer("Список изменился. Открой его заново.", show_alert=True)
+        value = items[idx]
+        servers = self.db.servers_with_country(value) if kind == "country" else self.db.servers_with_tag(value)
+        names = [str(row.get("name") or f"VPS #{row.get('id')}") for row in servers]
+        shown = names[:20]
+        server_lines = "\n".join(f"• {h(name)}" for name in shown)
+        if len(names) > len(shown):
+            server_lines += f"\n• … и ещё {len(names) - len(shown)}"
+        if kind == "country":
+            consequence = "У этих VPS поле <b>Страна</b> будет очищено."
+        else:
+            consequence = (
+                "У этих VPS тег будет удалён из поля <b>Теги</b>. "
+                "Остальные теги сохранятся; если этот тег был единственным, поле станет пустым."
+            )
+        text = (
+            f"{e(self.emojis, 'warning')} <b>Удалить {h(value)}?</b>\n\n"
+            f"Используется на VPS: <b>{len(names)}</b>\n"
+        )
+        if server_lines:
+            text += f"\n{server_lines}\n"
+        text += f"\n{consequence}\n\nТочно удалить?"
+        await q.message.edit_text(
+            text,
+            reply_markup=dictionary_delete_confirm_keyboard(kind, idx, self.emojis),
+        )
+
+    async def dictionary_delete_yes(self, q: CallbackQuery):
+        await q.answer()
+        try:
+            _, _, _, kind, raw_idx = q.data.split(":", 4)
+            idx = int(raw_idx)
+        except (ValueError, IndexError):
+            return await q.answer("Элемент не найден", show_alert=True)
+        if kind not in {"country", "tag"}:
+            return await q.answer("Удаление недоступно", show_alert=True)
+        items = self._dictionary_items(kind)
+        if idx < 0 or idx >= len(items):
+            return await q.answer("Список изменился. Открой его заново.", show_alert=True)
+        value = items[idx]
+        changed = self.db.delete_country(value) if kind == "country" else self.db.delete_tag(value)
+        title = "Страна удалена" if kind == "country" else "Тег удалён"
+        await q.message.edit_text(
+            f"{e(self.emojis, 'delete')} <b>{title}</b>\n\n"
+            f"{h(value)}\n"
+            f"Обновлено VPS: <b>{changed}</b>",
+            reply_markup=dictionary_items_keyboard(kind, self._dictionary_items(kind), self.emojis),
         )
 
     async def dictionary_rename_start(self, q: CallbackQuery, state: FSMContext):
@@ -841,7 +973,9 @@ class BotHandlers:
             reply_markup=reminder_keyboard(self.db.get_reminder_days(), self.db.overdue_daily(), self.db.payment_reminder_time(), self.emojis),
         )
 
-    async def reports_page(self, q: CallbackQuery):
+    async def reports_page(self, q: CallbackQuery, state: FSMContext | None = None):
+        if state:
+            await state.clear()
         await q.answer()
         emojis = self.emojis
         enabled = self.db.monthly_report_enabled()
@@ -852,7 +986,7 @@ class BotHandlers:
             f"{e(emojis, 'reports')} <b>Отчёт</b>\n\n"
             f"Месячный отчёт: <b>{'включён' if enabled else 'выключен'}</b>\n"
             f"Когда придёт: <b>{day}-го числа в {hour:02d}:{minute:02d}</b>\n\n"
-            "Выбери готовый вариант или введи день/время вручную."
+            "Выбери готовый день и время или введи их вручную."
         )
         await q.message.edit_text(text, reply_markup=reports_keyboard(enabled, day, hour, minute, emojis))
 
@@ -914,6 +1048,48 @@ class BotHandlers:
         await m.answer(
             f"{e(self.emojis, 'paid')} Время отчёта: <b>{self.db.report_hour():02d}:{self.db.report_minute():02d}</b>",
             reply_markup=reports_keyboard(self.db.monthly_report_enabled(), self.db.report_day(), self.db.report_hour(), self.db.report_minute(), self.emojis),
+        )
+
+    async def report_manual(self, q: CallbackQuery, state: FSMContext):
+        await q.answer()
+        await state.set_state(ReportScheduleInput.waiting)
+        back = InlineKeyboardMarkup(inline_keyboard=[[
+            button(self.emojis, "back", "Возврат", "settings:reports")
+        ]])
+        await q.message.edit_text(
+            f"{e(self.emojis, 'reports')} <b>День и время отчёта</b>\n\n"
+            "Введите день месяца и время через пробел.\n"
+            "Например: <code>3 15:00</code>\n\n"
+            "День: от <b>1</b> до <b>28</b>.",
+            reply_markup=back,
+        )
+
+    async def report_manual_input(self, m: Message, state: FSMContext):
+        raw = str(m.text or "").strip()
+        parts = raw.split()
+        if len(parts) != 2:
+            return await m.answer("Введите в формате: <code>3 15:00</code>")
+        try:
+            day = int(parts[0])
+        except ValueError:
+            return await m.answer("День должен быть числом от 1 до 28.")
+        if not 1 <= day <= 28:
+            return await m.answer("День должен быть от 1 до 28.")
+        try:
+            self.db.set_report_time(parts[1])
+        except ValueError as exc:
+            return await m.answer(f"{e(self.emojis, 'warning')} {h(exc)}")
+        self.db.set_setting("report_day", str(day))
+        await state.clear()
+        await m.answer(
+            f"{e(self.emojis, 'paid')} Отчёт будет приходить <b>{day}-го числа в {self.db.report_hour():02d}:{self.db.report_minute():02d}</b>",
+            reply_markup=reports_keyboard(
+                self.db.monthly_report_enabled(),
+                day,
+                self.db.report_hour(),
+                self.db.report_minute(),
+                self.emojis,
+            ),
         )
 
     async def report_default(self, q: CallbackQuery):
@@ -1196,20 +1372,64 @@ class BotHandlers:
         lines.append(f"{e(self.emojis, 'monitor')} Мониторинг: <b>{'ВКЛ' if enabled else 'ВЫКЛ'}</b>")
         await q.message.edit_text("\n".join(lines), reply_markup=server_details_keyboard(sid, self.emojis, has_ip=True, has_country=bool(str(server.get("country") or "").strip()), has_tags=bool(str(server.get("tags") or "").strip()), has_notes=bool(str(server.get("notes") or "").strip()), monitor_enabled=enabled))
 
-    def _cleanup_old_backups(self) -> tuple[int,int]:
-        files=[p for p in self.settings.backups_dir.iterdir() if p.is_file() and p.name.startswith("vps-bill-") and (p.suffix==".db" or p.name.endswith(".tar.gz"))]
-        files.sort(key=lambda p:p.stat().st_mtime, reverse=True)
-        cutoff=datetime.now().timestamp()-self.db.backup_keep_days()*86400
-        keep=self.db.backup_keep_count(); removed=0
-        for idx,p in enumerate(files):
-            if idx>=keep or p.stat().st_mtime<cutoff:
-                try: p.unlink(); removed+=1
-                except FileNotFoundError: pass
-        return removed, max(0,len(files)-removed)
+    def _cleanup_old_backups(self) -> tuple[int, int]:
+        """Apply the configured age/count retention policy to local backups."""
+        files = [
+            p for p in self.settings.backups_dir.iterdir()
+            if p.is_file() and p.name.startswith("vps-bill-")
+            and (p.suffix == ".db" or p.name.endswith(".tar.gz"))
+        ]
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        cutoff = datetime.now().timestamp() - self.db.backup_keep_days() * 86400
+        keep = self.db.backup_keep_count()
+        removed = 0
+        for idx, p in enumerate(files):
+            if idx >= keep or p.stat().st_mtime < cutoff:
+                try:
+                    p.unlink()
+                    removed += 1
+                except FileNotFoundError:
+                    pass
+        return removed, max(0, len(files) - removed)
+
+    def _delete_old_backups(self) -> tuple[int, int, int]:
+        return delete_old_backup_files(self.settings.backups_dir, days=30)
 
     async def backup_cleanup(self, q: CallbackQuery):
-        removed,left=self._cleanup_old_backups(); await q.answer(f"Удалено: {removed}")
-        await q.message.edit_text(f"{e(self.emojis,'backup')} <b>Бекап</b>\n\nСтарые копии очищены.\nУдалено: <b>{removed}</b>\nОсталось: <b>{left}</b>\nПолитика: {self.db.backup_keep_days()} дней / максимум {self.db.backup_keep_count()} файлов.", reply_markup=backups_keyboard(self.emojis))
+        removed, failed, freed_bytes = self._delete_old_backups()
+        if failed:
+            await q.answer(f"Удалено: {removed}, ошибок: {failed}", show_alert=True)
+        elif removed:
+            await q.answer(f"Удалено старых бекапов: {removed}")
+        else:
+            await q.answer("Старых бекапов нет")
+
+        if freed_bytes >= 1024 ** 3:
+            freed = f"{freed_bytes / (1024 ** 3):.1f} ГБ"
+        elif freed_bytes >= 1024 ** 2:
+            freed = f"{freed_bytes / (1024 ** 2):.1f} МБ"
+        elif freed_bytes >= 1024:
+            freed = f"{freed_bytes / 1024:.0f} КБ"
+        else:
+            freed = f"{freed_bytes} Б"
+
+        text = (
+            f"{e(self.emojis, 'backup')} <b>Бекап</b>\n\n"
+            "Удаляются только бекапы старше <b>30 дней</b>. "
+            "Более свежие резервные копии сохраняются.\n\n"
+        )
+        if removed:
+            text += (
+                f"Удалено: <b>{removed}</b>\n"
+                f"Освобождено: <b>{freed}</b>"
+            )
+        else:
+            text += "Старых бекапов нет."
+
+        if failed:
+            text += f"\nНе удалось удалить: <b>{failed}</b>"
+
+        await q.message.edit_text(text, reply_markup=backups_keyboard(self.emojis))
 
     def _update_check_clock(self) -> str:
         hh, mm = (int(x) for x in self.db.payment_reminder_time().split(":", 1))
@@ -1217,13 +1437,8 @@ class BotHandlers:
         return base.strftime("%H:%M")
 
     @staticmethod
-    def _release_notes_text(notes: str, limit: int = 2200) -> str:
-        value = str(notes or "").strip()
-        if not value:
-            return "Изменения не указаны."
-        if len(value) > limit:
-            value = value[:limit].rstrip() + "…"
-        return h(value)
+    def _release_notes_text(notes: str, limit: int = 3000) -> str:
+        return changelog_to_telegram_html(notes, limit=limit)
 
     async def update_page(self, q: CallbackQuery):
         await q.answer()
@@ -1329,6 +1544,9 @@ class BotHandlers:
             f"{e(self.emojis, 'backup')} <b>Бекап</b>",
             "",
             f"Архивов: <b>{len(archives)}</b>",
+            "",
+            "«Удалить старые бекапы» удаляет только резервные копии старше <b>30 дней</b>.",
+            "Более свежие бекапы сохраняются.",
         ]
         if files:
             lines += ["", "<b>Последние:</b>"]
@@ -1336,26 +1554,26 @@ class BotHandlers:
                 size_kb = max(1, file.stat().st_size // 1024)
                 lines.append(f"• <code>{h(file.name)}</code> · {size_kb} KB")
             if not archives and legacy:
-                lines += ["", "Старые backup .db продолжат работать; новые будут приходить архивом в Telegram."]
+                lines += ["", "Старые .db-бекапы продолжат работать; новые будут приходить архивом в Telegram."]
         else:
-            lines += ["", "Backup пока нет."]
+            lines += ["", "Бекапов пока нет."]
         await q.message.edit_text("\n".join(lines), reply_markup=backups_keyboard(self.emojis))
 
     async def backup(self, q: CallbackQuery):
-        await q.answer("Создаю и отправляю backup…")
+        await q.answer("Создаю и отправляю бекап…")
         emojis = self.emojis
         try:
             raw, archive, _ = await self._create_and_send_backup(q.bot, q.from_user.id)
             self._cleanup_old_backups()
             await q.message.edit_text(
-                f"{e(emojis, 'backup')} <b>Backup готов</b>\n\n"
+                f"{e(emojis, 'backup')} <b>Бекап готов</b>\n\n"
                 f"Архив отправлен вам в Telegram.\n"
                 f"Локально: <code>{h(archive.name)}</code>",
                 reply_markup=backups_keyboard(emojis),
             )
         except Exception as exc:
             await q.message.edit_text(
-                f"{e(emojis, 'warning')} <b>Backup создать/отправить не удалось</b>\n\n<code>{h(exc)}</code>",
+                f"{e(emojis, 'warning')} <b>Бекап создать/отправить не удалось</b>\n\n<code>{h(exc)}</code>",
                 reply_markup=backups_keyboard(emojis),
             )
 
@@ -1445,7 +1663,6 @@ class BotHandlers:
             if key == "tags" and value != "-":
                 value = " · ".join(x.strip() for x in value.split(",") if x.strip())
             lines.append(f"{e(self.emojis, slot)} {label}: <b>{h(value)}</b>")
-        lines += ["", "Нажми поле, чтобы изменить. Для очистки отправь <code>-</code>."]
         await q.message.edit_text("\n".join(lines), reply_markup=server_details_keyboard(sid, self.emojis, has_ip=bool(str(server.get("ip") or "").strip()), has_country=bool(str(server.get("country") or "").strip()), has_tags=bool(str(server.get("tags") or "").strip()), has_notes=bool(str(server.get("notes") or "").strip()), monitor_enabled=bool(server.get("monitor_enabled"))))
 
     async def country_choose(self, q: CallbackQuery):
@@ -1515,6 +1732,7 @@ class BotHandlers:
         _, sid_raw, field = q.data.split(":", 2)
         sid = int(sid_raw)
         labels = {
+            "name": "новое имя сервера",
             "ip": "IP",
             "country": "страну",
             "tags": "теги через запятую",
@@ -1525,22 +1743,46 @@ class BotHandlers:
         await state.set_state(EditServerField.waiting)
         await state.update_data(edit_server_id=sid, edit_server_field=field)
         await q.answer()
+        prompt = f"{e(self.emojis, 'edit')} Введите {labels[field]}."
+        if field != "name":
+            prompt += "\n\nДля очистки поля отправьте: <code>-</code>"
         await q.message.edit_text(
-            f"{e(self.emojis, 'edit')} Введите {labels[field]}.\n\nДля очистки поля отправьте: <code>-</code>",
-            reply_markup=cancel_keyboard(self.emojis),
+            prompt,
+            reply_markup=server_edit_back_keyboard(sid, self.emojis),
+        )
+
+    async def edit_server_back(self, q: CallbackQuery, state: FSMContext):
+        sid = int(q.data.split(":", 1)[1])
+        await state.clear()
+        server = self.db.get_server(sid)
+        await q.answer()
+        if not server or server.get("deleted_at"):
+            return await q.message.edit_text("Сервер не найден.", reply_markup=back_main(self.emojis))
+        await q.message.edit_text(
+            server_card(server, self.emojis),
+            reply_markup=server_buttons(
+                sid,
+                self.emojis,
+                balance_mode=str(server.get("billing_mode") or "") == "balance",
+            ),
         )
 
     async def edit_server_field_input(self, m: Message, state: FSMContext):
         data = await state.get_data()
         sid = int(data.get("edit_server_id", 0) or 0)
         field = str(data.get("edit_server_field") or "")
-        if not sid or field not in {"ip", "country", "tags", "notes", "tag_add"}:
+        if not sid or field not in {"name", "ip", "country", "tags", "notes", "tag_add"}:
             await state.clear()
             return await m.answer("Сессия редактирования устарела.", reply_markup=main_menu(self.emojis))
         value = (m.text or "").strip()
         if not value:
-            return await m.answer("Введите значение или <code>-</code> для очистки.", reply_markup=cancel_keyboard(self.emojis))
-        if value == "-":
+            message = "Введите новое имя сервера." if field == "name" else "Введите значение или <code>-</code> для очистки."
+            return await m.answer(message, reply_markup=server_edit_back_keyboard(sid, self.emojis))
+        if field == "name":
+            value = " ".join(value.split())[:128]
+            if value == "-":
+                return await m.answer("Имя сервера нельзя очистить. Введите новое имя.", reply_markup=server_edit_back_keyboard(sid, self.emojis))
+        elif value == "-":
             value = ""
         if field == "tag_add":
             self.db.add_server_tag(sid, value)
@@ -1557,18 +1799,18 @@ class BotHandlers:
         await q.answer()
         sid=int(q.data.split(":",1)[1]); srv=self.db.get_server(sid)
         if not srv: return
-        await q.message.edit_text(f"📦 <b>Переместить в архив?</b>\n\n{h(srv['name'])}\n\nИстория платежей сохранится в аналитике.", reply_markup=kb([[button(self.emojis,"server","В архив",f"archiveyes:{sid}",style="success")],[button(self.emojis,"cancel","Отмена",f"srvopen:{sid}")]]))
+        await q.message.edit_text(f"{e(self.emojis, 'server')} <b>Переместить в архив?</b>\n\n{h(srv['name'])}\n\nИстория платежей сохранится в аналитике.", reply_markup=kb([[button(self.emojis,"server","В архив",f"archiveyes:{sid}",style="success")],[button(self.emojis,"cancel","Отмена",f"srvopen:{sid}")]]))
 
     async def archive_yes(self, q: CallbackQuery):
         sid=int(q.data.split(":",1)[1]); self.db.archive_server(sid); await q.answer("Перемещено в архив")
-        items=self.db.list_archive(); await q.message.edit_text(f"📦 <b>Архив</b>\n\nСерверов: <b>{len(items)}</b>", reply_markup=archive_list_keyboard(items,self.emojis))
+        items=self.db.list_archive(); await q.message.edit_text(f"{e(self.emojis, 'server')} <b>Архив</b>\n\nСерверов: <b>{len(items)}</b>", reply_markup=archive_list_keyboard(items,self.emojis))
 
     async def archive_page(self, q: CallbackQuery):
         await q.answer(); items=self.db.list_archive(); page=0
         if q.data and q.data.startswith("archive:page:"):
             try: page=int(q.data.rsplit(":",1)[1])
             except ValueError: page=0
-        await q.message.edit_text(f"📦 <b>Архив VPS</b>\n\nСерверов: <b>{len(items)}</b>\nИстория оплат сохранена и продолжает учитываться в фактических расходах.", reply_markup=archive_list_keyboard(items,self.emojis,page=page))
+        await q.message.edit_text(f"{e(self.emojis, 'server')} <b>Архив VPS</b>\n\nСерверов: <b>{len(items)}</b>\nИстория оплат сохранена и продолжает учитываться в фактических расходах.", reply_markup=archive_list_keyboard(items,self.emojis,page=page))
 
     async def archive_item(self, q: CallbackQuery):
         await q.answer(); sid=int(q.data.split(":",1)[1]); srv=self.db.get_server(sid)
@@ -1581,7 +1823,7 @@ class BotHandlers:
 
     async def archive_to_trash(self, q: CallbackQuery):
         sid=int(q.data.split(":",1)[1]); self.db.archive_to_trash(sid); await q.answer("Перемещено в корзину")
-        items=self.db.list_archive(); await q.message.edit_text(f"📦 <b>Архив VPS</b>\n\nСерверов: <b>{len(items)}</b>", reply_markup=archive_list_keyboard(items,self.emojis))
+        items=self.db.list_archive(); await q.message.edit_text(f"{e(self.emojis, 'server')} <b>Архив VPS</b>\n\nСерверов: <b>{len(items)}</b>", reply_markup=archive_list_keyboard(items,self.emojis))
 
     async def trash_ask(self, q: CallbackQuery):
         sid = int(q.data.split(":", 1)[1])

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from .default_emojis import DEFAULT_CUSTOM_EMOJIS
@@ -252,6 +252,83 @@ class Database:
             )
             return int(cur.lastrowid)
 
+
+    def demo_server_ids(self) -> list[int]:
+        with self.conn() as c:
+            row = c.execute("SELECT value FROM meta WHERE key='demo_server_ids'").fetchone()
+        if not row or not str(row[0]).strip():
+            return []
+        ids: list[int] = []
+        for raw in str(row[0]).split(','):
+            try:
+                ids.append(int(raw.strip()))
+            except ValueError:
+                pass
+        if not ids:
+            return []
+        with self.conn() as c:
+            existing = {int(r[0]) for r in c.execute(
+                f"SELECT id FROM servers WHERE id IN ({','.join('?' for _ in ids)})", ids
+            ).fetchall()}
+        return [sid for sid in ids if sid in existing]
+
+    def demo_server_count(self) -> int:
+        return len(self.demo_server_ids())
+
+    def add_demo_servers(self, base_date: date | None = None) -> int:
+        """Create an idempotent demo set with dates relative to base_date."""
+        if self.demo_server_ids():
+            return 0
+        base_date = base_date or date.today()
+        demo = [
+            ("demo-web-hel1", "DemoCloud", 19900, "RUB", -5, "monthly", "192.0.2.10", "Финляндия", "demo,web", "Демо: просроченный платёж"),
+            ("demo-api-fra1", "DemoCloud", 499, "USD", 0, "monthly", "192.0.2.20", "Германия", "demo,prod", "Демо: оплата сегодня"),
+            ("demo-vpn-ams1", "DemoVPS", 699, "EUR", 1, "monthly", "192.0.2.30", "Нидерланды", "demo,vpn", "Демо: оплата завтра"),
+            ("demo-db-par1", "DemoVPS", 29900, "RUB", 3, "quarterly", "198.51.100.10", "Франция", "demo,storage", "Демо: ближайшая оплата через 3 дня"),
+            ("demo-backup-nyc1", "DemoHost", 899, "USD", 7, "yearly", "198.51.100.20", "США", "demo,backup", "Демо: оплата через неделю"),
+            ("demo-monitor-lon1", "DemoHost", 1299, "EUR", 30, "monthly", "203.0.113.10", "Великобритания", "demo,other", "Демо: более поздняя оплата"),
+        ]
+        ids: list[int] = []
+        for name, provider, amount, currency, offset, cycle, ip, country, tags, notes in demo:
+            sid = self.add_server(
+                name=name, provider=provider, amount_minor=amount, currency=currency,
+                next_due=(base_date + timedelta(days=offset)).isoformat(),
+                cycle=cycle, notes=notes,
+            )
+            self.update_server_field(sid, "ip", ip)
+            self.update_server_field(sid, "country", country)
+            self.update_server_field(sid, "tags", tags)
+            ids.append(sid)
+        for provider in ("DemoCloud", "DemoVPS", "DemoHost"):
+            self.set_provider_url(provider, "https://example.com/")
+        with self.conn() as c:
+            c.execute(
+                "INSERT INTO meta(key,value) VALUES('demo_server_ids',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (','.join(str(x) for x in ids),),
+            )
+        return len(ids)
+
+    def delete_demo_servers(self) -> int:
+        ids = self.demo_server_ids()
+        if not ids:
+            with self.conn() as c:
+                c.execute("DELETE FROM meta WHERE key='demo_server_ids'")
+            return 0
+        with self.conn() as c:
+            q = ','.join('?' for _ in ids)
+            count = int(c.execute(f"SELECT COUNT(*) FROM servers WHERE id IN ({q})", ids).fetchone()[0])
+            c.execute(f"DELETE FROM servers WHERE id IN ({q})", ids)
+            c.execute("DELETE FROM meta WHERE key='demo_server_ids'")
+            for provider in ("DemoCloud", "DemoVPS", "DemoHost"):
+                used = c.execute(
+                    "SELECT 1 FROM servers WHERE lower(trim(provider))=lower(trim(?)) LIMIT 1",
+                    (provider,),
+                ).fetchone()
+                if not used:
+                    c.execute("DELETE FROM provider_settings WHERE lower(trim(provider))=lower(trim(?))", (provider,))
+        return count
+
     def list_servers(self, active_only: bool = True) -> list[dict]:
         q = "SELECT * FROM servers" + (" WHERE active=1 AND deleted_at IS NULL AND archived_at IS NULL" if active_only else "") + " ORDER BY date(next_due), lower(name)"
         with self.conn() as c:
@@ -339,7 +416,7 @@ class Database:
             c.execute("UPDATE servers SET next_due=?, updated_at=? WHERE id=?", (next_due, now_iso(), server_id))
 
     def update_server_field(self, server_id: int, field: str, value: str) -> None:
-        allowed = {"ip", "country", "purpose", "tags", "notes"}
+        allowed = {"name", "ip", "country", "purpose", "tags", "notes"}
         if field not in allowed:
             raise ValueError("Недопустимое поле")
         value = (value or "").strip()
@@ -849,7 +926,11 @@ class Database:
     def used_tags(self) -> list[str]:
         counts: dict[str, int] = {}
         names: dict[str, str] = {}
-        for row in self.list_servers():
+        with self.conn() as c:
+            rows = [dict(r) for r in c.execute(
+                "SELECT tags FROM servers WHERE deleted_at IS NULL AND trim(tags)<>''"
+            ).fetchall()]
+        for row in rows:
             for raw in str(row.get("tags") or "").split(","):
                 tag = raw.strip()
                 if not tag:
@@ -858,6 +939,67 @@ class Database:
                 counts[key] = counts.get(key, 0) + 1
                 names.setdefault(key, tag)
         return [names[k] for k in sorted(counts, key=lambda x: (-counts[x], names[x].casefold()))]
+
+    def servers_with_country(self, country: str) -> list[dict]:
+        country = " ".join(str(country).strip().split())
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT id,name,archived_at FROM servers "
+                "WHERE deleted_at IS NULL AND lower(trim(country))=lower(trim(?)) "
+                "ORDER BY lower(name)",
+                (country,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def servers_with_tag(self, tag: str) -> list[dict]:
+        tag = " ".join(str(tag).replace("#", "").strip().split())
+        result: list[dict] = []
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT id,name,tags,archived_at FROM servers "
+                "WHERE deleted_at IS NULL AND trim(tags)<>'' ORDER BY lower(name)"
+            ).fetchall()
+        for row in rows:
+            tags = [x.strip() for x in str(row["tags"] or "").split(",") if x.strip()]
+            if any(x.casefold() == tag.casefold() for x in tags):
+                result.append(dict(row))
+        return result
+
+    def delete_country(self, country: str) -> int:
+        country = " ".join(str(country).strip().split())
+        if not country:
+            raise ValueError("Страна не задана")
+        with self.conn() as c:
+            cur = c.execute(
+                "UPDATE servers SET country='', updated_at=? "
+                "WHERE deleted_at IS NULL AND lower(trim(country))=lower(trim(?))",
+                (datetime.now(timezone.utc).isoformat(), country),
+            )
+            c.commit()
+            return int(cur.rowcount or 0)
+
+    def delete_tag(self, tag: str) -> int:
+        tag = " ".join(str(tag).replace("#", "").strip().split())
+        if not tag:
+            raise ValueError("Тег не задан")
+        changed = 0
+        now = datetime.now(timezone.utc).isoformat()
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT id,tags FROM servers WHERE deleted_at IS NULL AND trim(tags)<>''"
+            ).fetchall()
+            for row in rows:
+                tags = [x.strip() for x in str(row["tags"] or "").split(",") if x.strip()]
+                kept = [x for x in tags if x.casefold() != tag.casefold()]
+                if len(kept) == len(tags):
+                    continue
+                c.execute(
+                    "UPDATE servers SET tags=?, updated_at=? WHERE id=?",
+                    (",".join(kept), now, int(row["id"])),
+                )
+                changed += 1
+            c.commit()
+        return changed
 
     def toggle_server_tag(self, server_id: int, tag: str) -> bool:
         server = self.get_server(server_id)

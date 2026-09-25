@@ -9,3 +9,15 @@ find "$TMP/$NAME" -type f -name "*.py[co]" -delete
 mkdir -p "$OUT"; tar -C "$TMP" -czf "$OUT/$NAME.tar.gz" "$NAME"
 (cd "$OUT" && sha256sum "$NAME.tar.gz" > SHA256SUMS)
 echo "Создан: $OUT/$NAME.tar.gz"
+
+
+# Release hygiene: never package runtime/test/cache/secrets.
+# If this script uses tar directly, keep these exclusions equivalent:
+#   --exclude='*/__pycache__/*'
+#   --exclude='*/.pytest_cache/*'
+#   --exclude='*.pyc'
+#   --exclude='.git'
+#   --exclude='.env'
+#   --exclude='data'
+#   --exclude='backups'
+#   --exclude='update-requests'

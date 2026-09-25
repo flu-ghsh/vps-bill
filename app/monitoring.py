@@ -36,24 +36,44 @@ async def ping_probe(ip: str, timeout: int, *, attempts: int = 3, delay: float =
     return False
 
 
-async def tcp_probe(ip: str, port: int, timeout: int) -> bool:
+async def tcp_probe_detailed(ip: str, port: int, timeout: int) -> tuple[bool, str]:
+    """Return (host_reachable, tcp_status).
+
+    tcp_status values:
+      ok       - TCP connection established;
+      refused  - target returned TCP RST (host reachable, service/port closed);
+      timeout  - no TCP reply before timeout;
+      error    - another socket/network error;
+      invalid  - invalid target address.
+
+    A refused connection still proves that the VPS/network stack is reachable,
+    which is what Auto mode uses as the ICMP fallback.
+    """
     if not valid_ip(ip):
-        return False
+        return False, "invalid"
     try:
-        _reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, int(port)), timeout=timeout)
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, int(port)), timeout=timeout
+        )
         writer.close()
         try:
             await writer.wait_closed()
         except Exception:
             pass
-        return True
+        return True, "ok"
     except ConnectionRefusedError:
-        # TCP RST means the host/network stack replied. The service may be closed,
-        # but for host-availability monitoring this still proves the VPS is reachable.
-        return True
-    except (asyncio.TimeoutError, OSError) as exc:
+        return True, "refused"
+    except asyncio.TimeoutError as exc:
+        print(f"tcp {ip}:{port} timeout: {exc}", flush=True)
+        return False, "timeout"
+    except OSError as exc:
         print(f"tcp {ip}:{port} failed: {exc}", flush=True)
-        return False
+        return False, "error"
+
+
+async def tcp_probe(ip: str, port: int, timeout: int) -> bool:
+    ok, _status = await tcp_probe_detailed(ip, port, timeout)
+    return ok
 
 
 async def probe_host(ip: str, *, method: str, port: int, timeout: int) -> tuple[bool, dict[str, str]]:
@@ -64,8 +84,10 @@ async def probe_host(ip: str, *, method: str, port: int, timeout: int) -> tuple[
         ping_ok = await ping_probe(ip, timeout)
         details["ping"] = "ok" if ping_ok else "fail"
         if method == "ping" or ping_ok:
+            # In Auto mode TCP is intentionally not executed after a successful Ping.
+            # Keep the explicit 'skip' state so notifications don't claim the port failed.
             return ping_ok, details
 
-    tcp_ok = await tcp_probe(ip, port, timeout)
-    details["tcp"] = "ok" if tcp_ok else "fail"
+    tcp_ok, tcp_status = await tcp_probe_detailed(ip, port, timeout)
+    details["tcp"] = tcp_status
     return tcp_ok, details

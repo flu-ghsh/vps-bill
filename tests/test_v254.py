@@ -59,5 +59,5 @@ def test_v254_ui_text_and_no_progress_bars():
     assert "█" not in handlers and "░" not in handlers
     assert "Ссылка на ЛК" in ui
     assert "Время уведомления" in handlers
-    assert "Ввести день вручную" in ui
-    assert "Ввести время вручную" in ui
+    assert "Ввести день и время" in ui
+    assert "Ввести время вручную" not in ui

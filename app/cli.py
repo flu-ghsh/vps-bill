@@ -38,6 +38,9 @@ def main() -> None:
     h = sub.add_parser("health"); h.add_argument("--telegram", action="store_true"); h.add_argument("--runtime", action="store_true")
     b = sub.add_parser("backup"); b.add_argument("--output")
     sub.add_parser("auto-update-config")
+    sub.add_parser("demo-add")
+    sub.add_parser("demo-remove")
+    sub.add_parser("demo-status")
     args = parser.parse_args()
 
     s, db = get_db()
@@ -51,6 +54,14 @@ def main() -> None:
         db.backup_to(out); print(str(out)); return
     if args.cmd == "auto-update-config":
         print(json.dumps({"enabled": db.auto_update_enabled(), "manifest_url": db.auto_update_manifest_url() or s.update_manifest_url or ""}, ensure_ascii=False)); return
+    if args.cmd == "demo-add":
+        added = db.add_demo_servers()
+        print(json.dumps({"status": "ok", "added": added, "total": db.demo_server_count()}, ensure_ascii=False)); return
+    if args.cmd == "demo-remove":
+        removed = db.delete_demo_servers()
+        print(json.dumps({"status": "ok", "removed": removed, "total": db.demo_server_count()}, ensure_ascii=False)); return
+    if args.cmd == "demo-status":
+        print(json.dumps({"status": "ok", "count": db.demo_server_count(), "ids": db.demo_server_ids()}, ensure_ascii=False)); return
     if args.cmd == "health":
         info = db.integrity()
         result = {"db": {"status": "ok" if info["integrity"] == "ok" else info["integrity"]}, "runtime": "skipped", "telegram": "skipped"}

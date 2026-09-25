@@ -6,12 +6,13 @@ from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BotCommand, CallbackQuery, Message
 
 from .config import Settings
 from .db import Database
 from .handlers import BotHandlers
 from .notifier import Notifier
+from .updates import cleanup_stale_update_temps
 
 
 class AdminOnlyMiddleware(BaseMiddleware):
@@ -31,6 +32,9 @@ class AdminOnlyMiddleware(BaseMiddleware):
 
 async def main() -> None:
     settings = Settings.from_env()
+    # Self-heal stale updater temp files before Telegram callbacks can use the
+    # request directory. This also repairs hosts upgraded from old releases.
+    cleanup_stale_update_temps(settings.update_requests_dir)
     db = Database(settings.db_path)
     session = AiohttpSession(proxy=settings.telegram_proxy) if settings.telegram_proxy else AiohttpSession()
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML), session=session)
@@ -44,6 +48,7 @@ async def main() -> None:
     notify_task = asyncio.create_task(notifier.run())
     try:
         me = await bot.get_me()
+        await bot.set_my_commands([BotCommand(command="start", description="Main menu")])
         print(f"VPS Bill started as @{me.username}", flush=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:

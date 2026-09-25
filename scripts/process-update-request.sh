@@ -52,8 +52,12 @@ curl -fsSL -H 'Accept: application/vnd.github+json' -H 'User-Agent: VPS-Bill' \
 readarray -t META < <(python3 - "$API" "$VERSION" <<'PY'
 import json,sys
 obj=json.load(open(sys.argv[1],encoding='utf-8')); version=sys.argv[2]
-tag=str(obj.get('tag_name') or '')
-actual=tag[1:] if tag.startswith('v') else tag
+import re
+tag=str(obj.get('tag_name') or '').strip()
+m=re.fullmatch(r'(?:v\.?)?(\d+)\.(\d+)\.(\d+)', tag, flags=re.I)
+if not m:
+    raise SystemExit(f'Invalid GitHub release tag: {tag!r}')
+actual='.'.join(m.groups())
 if actual != version:
     raise SystemExit(f'Latest GitHub release is {actual}, requested {version}')
 name=f'vps-bill-{version}.tar.gz'

@@ -22,7 +22,7 @@ def test_v257_ui_and_scripts():
     update = (root / 'scripts' / 'update.sh').read_text()
     assert 'Что нового' not in ui
     assert 'В архив' in ui
-    assert 'Очистить старые backup' in ui
+    assert 'Удалить старые бекапы' in ui
     assert 'Обновление' in ui
     assert 'Автообновление' not in ui
     assert 'install-update-bridge.sh' in update

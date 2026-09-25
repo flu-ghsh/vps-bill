@@ -17,6 +17,7 @@ EMOJI_SLOTS: dict[str, tuple[str, str]] = {
     "add": ("➕", "Добавить"),
     "calendar": ("📅", "Календарь"),
     "settings": ("⚙️", "Настройки"),
+    "dictionaries": ("📚", "Справочники"),
     "update": ("⬆️", "Обновление"),
     "paid": ("✅", "Оплачено"),
     "snooze": ("⏰", "Напомнить"),
@@ -139,6 +140,12 @@ def cancel_keyboard(emojis: dict[str, str]) -> InlineKeyboardMarkup:
     ]])
 
 
+def server_edit_back_keyboard(server_id: int, emojis: dict[str, str]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        button(emojis, "back", "К карточке", f"editback:{server_id}")
+    ]])
+
+
 def server_buttons(server_id: int, emojis: dict[str, str], *, balance_mode: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if balance_mode:
@@ -162,6 +169,7 @@ def server_buttons(server_id: int, emojis: dict[str, str], *, balance_mode: bool
 
 def server_details_keyboard(server_id: int, emojis: dict[str, str], *, has_ip: bool = False, has_country: bool = False, has_tags: bool = False, has_notes: bool = False, monitor_enabled: bool = False) -> InlineKeyboardMarkup:
     rows = [
+        [button(emojis, "edit", "Имя", f"editfield:{server_id}:name", style="success")],
         [
             button(emojis, "ip", "IP", f"editfield:{server_id}:ip", style="success" if has_ip else None),
             button(emojis, "country", "Страна", f"country:choose:{server_id}", style="success" if has_country else None),
@@ -312,8 +320,8 @@ def trash_item_keyboard(server_id: int, emojis: dict[str, str]) -> InlineKeyboar
 
 def backups_keyboard(emojis: dict[str, str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [button(emojis, "backup", "Создать и прислать backup", "backup:create", style="success")],
-        [button(emojis, "trash", "Очистить старые backup", "backup:cleanup")],
+        [button(emojis, "backup", "Создать и прислать бекап", "backup:create", style="success")],
+        [button(emojis, "trash", "Удалить старые бекапы", "backup:cleanup", style="danger")],
         [button(emojis, "back", "К настройкам", "settings")],
     ])
 
@@ -492,7 +500,14 @@ def calendar_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def dictionaries_keyboard(emojis: dict[str, str]) -> InlineKeyboardMarkup:
+def dictionaries_keyboard(emojis: dict[str, str], *, demo_present: bool = False) -> InlineKeyboardMarkup:
+    demo_button = button(
+        emojis,
+        "server",
+        "Удалить демо-серверы" if demo_present else "Добавить демо-серверы",
+        "demo:remove:ask" if demo_present else "demo:add:ask",
+        style="danger" if demo_present else None,
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             button(emojis, "provider", "Хостеры", "dict:provider"),
@@ -502,17 +517,33 @@ def dictionaries_keyboard(emojis: dict[str, str]) -> InlineKeyboardMarkup:
             button(emojis, "tags", "Теги", "dict:tag"),
             button(emojis, "emoji", "Эмодзи", "settings:emojis"),
         ],
+        [demo_button],
         [button(emojis, "back", "К настройкам", "settings")],
+    ])
+
+
+def demo_confirm_keyboard(action: str, emojis: dict[str, str]) -> InlineKeyboardMarkup:
+    if action == "add":
+        primary = button(emojis, "add", "Добавить демо-серверы", "demo:add:yes")
+    else:
+        primary = button(emojis, "delete", "Удалить демо-серверы", "demo:remove:yes", style="danger")
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [primary],
+        [button(emojis, "back", "К справочникам", "settings:dictionaries")],
     ])
 
 
 def dictionary_items_keyboard(kind: str, items: list[str], emojis: dict[str, str]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     limited = items[:30]
+    slot = "provider" if kind == "provider" else "tags" if kind == "tag" else None
     for i in range(0, len(limited), 2):
         row=[]
         for idx in range(i, min(i + 2, len(limited))):
-            row.append(InlineKeyboardButton(text=limited[idx], callback_data=f"dict:item:{kind}:{idx}"))
+            if slot:
+                row.append(button(emojis, slot, limited[idx], f"dict:item:{kind}:{idx}"))
+            else:
+                row.append(InlineKeyboardButton(text=limited[idx], callback_data=f"dict:item:{kind}:{idx}"))
         rows.append(row)
     rows.append([button(emojis, "back", "К справочникам", "settings:dictionaries")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -523,9 +554,20 @@ def dictionary_edit_keyboard(kind: str, idx: int, emojis: dict[str, str], provid
     if kind == "provider":
         rows.append([button(emojis, "provider", "Ссылка на ЛК", f"dict:url:{idx}")])
         if provider_url:
-            rows.append([InlineKeyboardButton(text="Открыть ЛК", url=provider_url)])
+            cabinet_id = emojis.get("cabinet", "")
+            cabinet_text = "Открыть ЛК" if cabinet_id else f"{EMOJI_SLOTS['cabinet'][0]} Открыть ЛК"
+            rows.append([InlineKeyboardButton(text=cabinet_text, url=provider_url, icon_custom_emoji_id=cabinet_id or None)])
+    elif kind in {"country", "tag"}:
+        rows.append([button(emojis, "delete", "Удалить", f"dict:delete:ask:{kind}:{idx}", style="danger")])
     rows.append([button(emojis, "back", "К списку", f"dict:{kind}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def dictionary_delete_confirm_keyboard(kind: str, idx: int, emojis: dict[str, str]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [button(emojis, "delete", "Да, удалить", f"dict:delete:yes:{kind}:{idx}", style="danger")],
+        [button(emojis, "back", "Возврат", f"dict:item:{kind}:{idx}")],
+    ])
 
 
 def settings_keyboard(emojis: dict[str, str]) -> InlineKeyboardMarkup:
@@ -540,7 +582,7 @@ def settings_keyboard(emojis: dict[str, str]) -> InlineKeyboardMarkup:
         ],
         [button(emojis, "monitor", "Мониторинг", "settings:monitoring")],
         [
-            button(emojis, "provider", "Справочники", "settings:dictionaries"),
+            button(emojis, "dictionaries", "Справочники", "settings:dictionaries"),
             button(emojis, "backup", "Бекап", "settings:backups"),
         ],
         [button(emojis, "update", "Обновление", "settings:update")],
@@ -567,7 +609,7 @@ def reminder_keyboard(reminder_days: tuple[int, ...], overdue_daily: bool, remin
         callback_data="rem:overdue",
         style="success" if overdue_daily else None,
     )])
-    preset_times = ("09:00", "10:00", "12:00", "18:00")
+    preset_times = ("10:00", "15:00", "20:00")
     rows.append([
         InlineKeyboardButton(
             text=("✓ " if reminder_time == value else "") + value,
@@ -590,40 +632,25 @@ def reports_keyboard(enabled: bool, report_day: int, report_hour: int, report_mi
         )
     ]]
 
-    days = (1, 5, 10, 15, 20, 25, 28)
+    days = (1, 3, 5, 10)
     rows.append([
         InlineKeyboardButton(
             text=("✓ " if day == report_day else "") + str(day),
             callback_data=f"report:day:{day}",
             style="success" if day == report_day else None,
-        ) for day in days[:4]
+        ) for day in days
     ])
-    rows.append([
-        InlineKeyboardButton(
-            text=("✓ " if day == report_day else "") + str(day),
-            callback_data=f"report:day:{day}",
-            style="success" if day == report_day else None,
-        ) for day in days[4:]
-    ])
-    rows.append([button(emojis, "edit", "Ввести день вручную", "report:day:manual")])
 
     current_time = f"{report_hour:02d}:{report_minute:02d}"
-    times = ("09:00", "10:00", "12:00", "18:00", "21:00")
+    times = ("10:00", "15:00", "20:00")
     rows.append([
         InlineKeyboardButton(
             text=("✓ " if value == current_time else "") + value,
             callback_data=f"report:time:{value.replace(':', '')}",
             style="success" if value == current_time else None,
-        ) for value in times[:3]
+        ) for value in times
     ])
-    rows.append([
-        InlineKeyboardButton(
-            text=("✓ " if value == current_time else "") + value,
-            callback_data=f"report:time:{value.replace(':', '')}",
-            style="success" if value == current_time else None,
-        ) for value in times[3:]
-    ])
-    rows.append([button(emojis, "edit", "Ввести время вручную", "report:time:manual")])
+    rows.append([button(emojis, "edit", "Ввести день и время", "report:manual")])
     rows.append([button(emojis, "reset", "По умолчанию", "report:default", style="primary")])
     rows.append([button(emojis, "back", "К настройкам", "settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

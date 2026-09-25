@@ -1,35 +1,4 @@
 #!/usr/bin/env bash
-
-# VPS_BILL_REMOTE_BOOTSTRAP
-# При запуске через curl/process substitution рядом со скриптом нет VERSION
-# и остальных файлов проекта. В таком случае скачиваем весь репозиторий
-# во временный каталог и запускаем локальную копию install.sh.
-_VPS_BILL_SCRIPT="${BASH_SOURCE[0]:-}"
-_VPS_BILL_DIR="$(cd -- "$(dirname -- "$_VPS_BILL_SCRIPT")" 2>/dev/null && pwd -P || true)"
-
-if [[ -z "$_VPS_BILL_DIR" || ! -f "$_VPS_BILL_DIR/VERSION" ]]; then
-    _VPS_BILL_TMP="$(mktemp -d)"
-
-    _vps_bill_cleanup() {
-        rm -rf "$_VPS_BILL_TMP"
-    }
-    trap _vps_bill_cleanup EXIT
-
-    echo "▶ Загружаю VPS Bill с GitHub..."
-
-    curl -fsSL \
-        "https://github.com/flu-ghsh/vps-bill/archive/refs/heads/main.tar.gz" \
-        | tar -xz -C "$_VPS_BILL_TMP" --strip-components=1
-
-    if [[ ! -f "$_VPS_BILL_TMP/install.sh" ]]; then
-        echo "✖ Не удалось загрузить установщик VPS Bill."
-        exit 1
-    fi
-
-    bash "$_VPS_BILL_TMP/install.sh" "$@"
-    exit $?
-fi
-
 set -Eeuo pipefail
 
 BASE=/opt/vps-bill
@@ -66,59 +35,50 @@ fi
 docker compose version >/dev/null 2>&1 || { err "Docker Compose plugin не найден"; exit 1; }
 ok "Docker готов"
 
-mkdir -p "$BASE" "$BASE/data" "$BASE/backups" "$BASE/releases" "$RELEASE"
+mkdir -p "$BASE" "$BASE/data" "$BASE/backups" "$BASE/update-downloads" "$BASE/releases" "$RELEASE"
+install -d -o 10001 -g 10001 -m 0770 "$BASE/update-requests"
 chown -R 10001:10001 "$BASE/data" "$BASE/backups"
+chown 10001:10001 "$BASE/update-requests"
+chmod 0770 "$BASE/update-requests"
+rm -f "$BASE/update-requests/.request.json.tmp" 2>/dev/null || true
+find "$BASE/update-requests" -maxdepth 1 -type f -name '.request.*.tmp' -delete 2>/dev/null || true
 
 # Копируем только release-файлы; это безопасно даже когда install.sh запущен из /opt/vps-bill.
 rm -rf "$RELEASE/app" "$RELEASE/scripts" "$RELEASE/tests"
 cp -a "$SELF_DIR/app" "$SELF_DIR/scripts" "$SELF_DIR/tests" "$RELEASE/"
-cp -aL "$SELF_DIR/Dockerfile" "$SELF_DIR/requirements.txt" "$SELF_DIR/VERSION" "$SELF_DIR/.dockerignore" "$SELF_DIR/.env.example" "$SELF_DIR/README.md" "$SELF_DIR/install.sh" "$RELEASE/"
-cp -aL "$SELF_DIR/compose.example.yaml" "$RELEASE/compose.yaml"
+cp -aL "$SELF_DIR/Dockerfile" "$SELF_DIR/requirements.txt" "$SELF_DIR/VERSION" "$SELF_DIR/compose.yaml" "$SELF_DIR/.dockerignore" "$SELF_DIR/.env.example" "$SELF_DIR/README.md" "$SELF_DIR/CHANGELOG.md" "$SELF_DIR/install.sh" "$RELEASE/"
 chmod +x "$RELEASE/scripts"/*.sh
 
 # Существующий валидный .env сохраняем. Пустой/старый env пересоздаём.
+FRESH_INSTALL=0
 if [[ -f "$ENV" ]] && grep -q '^BOT_TOKEN=' "$ENV" && grep -q '^ADMIN_IDS=' "$ENV"; then
   c "Найден $ENV — сохраняю существующие настройки"
 else
-  BOT_TOKEN=""; ADMIN_IDS=""; TELEGRAM_PROXY=""; TZ_VALUE=""
+  FRESH_INSTALL=1
+  BOT_TOKEN=""; ADMIN_IDS=""; TELEGRAM_PROXY=""
   while [[ -z "$BOT_TOKEN" ]]; do secret BOT_TOKEN "BOT_TOKEN от @BotFather"; [[ -n "$BOT_TOKEN" ]] || err "BOT_TOKEN не может быть пустым"; done
   while [[ -z "$ADMIN_IDS" ]]; do ask ADMIN_IDS "Ваш Telegram numeric ID"; [[ "$ADMIN_IDS" =~ ^[0-9]+([,;][0-9]+)*$ ]] || { err "Нужен numeric Telegram ID"; ADMIN_IDS=""; }; done
   ask TELEGRAM_PROXY "SOCKS5 для Telegram (например s5.example.com:1080; пусто = напрямую)" ""
   TELEGRAM_PROXY="$(normalize_proxy "$TELEGRAM_PROXY")"
   SYS_TZ=$(timedatectl show -p Timezone --value 2>/dev/null || true); SYS_TZ=${SYS_TZ:-Europe/Moscow}
-  ask TZ_VALUE "Timezone" "$SYS_TZ"
   cat > "$ENV" <<EOF
 APP_VERSION=$VERSION
 BOT_TOKEN=$(qenv "$BOT_TOKEN")
 ADMIN_IDS=$(qenv "$ADMIN_IDS")
 TELEGRAM_PROXY=$(qenv "$TELEGRAM_PROXY")
-TZ=$(qenv "$TZ_VALUE")
+TZ=$(qenv "$SYS_TZ")
 CHECK_INTERVAL_SECONDS=60
-REMINDER_DAYS="7,3,1,0"
-MONTHLY_REPORT_ENABLED=true
-REPORT_HOUR=10
-EMOJI_MONEY_ID=""
-EMOJI_SERVER_ID=""
-EMOJI_CHART_ID=""
-EMOJI_CALENDAR_ID=""
-EMOJI_SETTINGS_ID=""
-EMOJI_OK_ID=""
-EMOJI_WARNING_ID=""
 EOF
   chmod 600 "$ENV"
   ok "Конфигурация сохранена в $ENV"
 fi
 
 # Убираем ключи старого экспериментального Infra Billing — v2 их не использует.
-sed -i '/^INFRA_BILLING_/d' "$ENV"
+sed -i '/^INFRA_BILLING_/d; /^REMINDER_DAYS=/d; /^MONTHLY_REPORT_ENABLED=/d; /^REPORT_HOUR=/d; /^EMOJI_.*_ID=/d' "$ENV"
 if grep -q '^APP_VERSION=' "$ENV"; then sed -i "s/^APP_VERSION=.*/APP_VERSION=$VERSION/" "$ENV"; else printf '\nAPP_VERSION=%s\n' "$VERSION" >> "$ENV"; fi
 ensure_env(){ local key="$1" value="$2"; grep -q "^${key}=" "$ENV" || printf '%s=%s\n' "$key" "$value" >> "$ENV"; }
 ensure_env TZ '"Europe/Moscow"'
 ensure_env CHECK_INTERVAL_SECONDS '60'
-ensure_env REMINDER_DAYS '"7,3,1,0"'
-ensure_env MONTHLY_REPORT_ENABLED 'true'
-ensure_env REPORT_HOUR '10'
-ensure_env UPDATE_MANIFEST_URL '""'
 ensure_env TELEGRAM_PROXY '""'
 chmod 600 "$ENV"
 
@@ -142,43 +102,43 @@ docker compose -f "$BASE/compose.yaml" --env-file "$ENV" run --rm bot python -m 
 cat /tmp/vps-bill-migrate.log
 ok "База готова: $BASE/data/billing.db"
 
-docker compose -f "$BASE/compose.yaml" --env-file "$ENV" up -d
-
-if [[ -n "${TELEGRAM_PROXY:-}" ]]; then
-  c "Проверяю Telegram через SOCKS5"
-  PASS=0
-  for _ in $(seq 1 15); do
-    if docker compose -f "$BASE/compose.yaml" --env-file "$ENV" exec -T bot python -m app.cli health --telegram >/tmp/vps-bill-health.log 2>&1; then
-      PASS=1
-      break
-    fi
-    sleep 2
-  done
-
-  if [[ $PASS -ne 1 ]]; then
-    cat /tmp/vps-bill-health.log >&2 || true
-    err "Не удалось подключиться к Telegram через SOCKS5. Логи: docker logs vps-bill"
-    exit 1
-  fi
-
-  cat /tmp/vps-bill-health.log
-else
-  ok "SOCKS5 не задан — используется прямое подключение к Telegram"
+if [[ "$FRESH_INSTALL" -eq 1 ]]; then
+  DEMO_ANSWER=""
+  read -r -p "Добавить демо-серверы? [y/N]: " DEMO_ANSWER </dev/tty || true
+  case "${DEMO_ANSWER,,}" in
+    y|yes|д|да)
+      c "Добавляю демо-серверы"
+      docker compose -f "$BASE/compose.yaml" --env-file "$ENV" run --rm bot python -m app.cli demo-add
+      ;;
+    *)
+      ok "Демо-серверы не добавлены"
+      ;;
+  esac
 fi
 
+docker compose -f "$BASE/compose.yaml" --env-file "$ENV" up -d
 
-# Удаляем старые имена команд, если остались от прежних версий.
-rm -f   /usr/local/bin/vps-bill-update   /usr/local/bin/vps-bill-backup   /usr/local/bin/vps-bill-restore
+c "Проверяю подключение Telegram"
+PASS=0
+for _ in $(seq 1 15); do
+  if docker compose -f "$BASE/compose.yaml" --env-file "$ENV" exec -T bot python -m app.cli health --telegram --runtime >/tmp/vps-bill-health.log 2>&1; then PASS=1; break; fi
+  sleep 2
+done
+if [[ $PASS -ne 1 ]]; then
+  cat /tmp/vps-bill-health.log >&2 || true
+  err "Health-check не пройден. Логи: docker logs vps-bill"
+  exit 1
+fi
+cat /tmp/vps-bill-health.log
 
-# Команды управления VPS Bill
 ln -sfn "$BASE/current/scripts/update.sh" /usr/local/bin/vps-bill-update
 ln -sfn "$BASE/current/scripts/backup.sh" /usr/local/bin/vps-bill-backup
 ln -sfn "$BASE/current/scripts/restore.sh" /usr/local/bin/vps-bill-restore
+# Backward-compatible aliases from older releases.
+ln -sfn "$BASE/current/scripts/update.sh" /usr/local/bin/billing-bot-update
+ln -sfn "$BASE/current/scripts/backup.sh" /usr/local/bin/billing-bot-backup
+ln -sfn "$BASE/current/scripts/restore.sh" /usr/local/bin/billing-bot-restore
 
-chmod +x   "$BASE/current/scripts/update.sh"   "$BASE/current/scripts/backup.sh"   "$BASE/current/scripts/restore.sh"
-
-# Старые названия больше не используются.
-rm -f   /usr/local/bin/billing-bot-update   /usr/local/bin/billing-bot-backup   /usr/local/bin/billing-bot-restore
-
+"$BASE/current/scripts/install-update-bridge.sh" >/dev/null 2>&1 || true
 ok "VPS Bill установлен"
 printf '\nРабочая папка: %s\nENV: %s\n\nКоманды:\n  docker compose -f %s/compose.yaml --env-file %s/.env ps\n  docker logs -f vps-bill\n  vps-bill-backup\n  vps-bill-restore\n  vps-bill-update --file <release.tar.gz>\n\n' "$BASE" "$ENV" "$BASE" "$BASE"

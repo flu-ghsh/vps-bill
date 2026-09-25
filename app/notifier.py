@@ -14,7 +14,7 @@ from .config import Settings
 from .db import Database
 from .monitoring import probe_host
 from .ui import e, h, notification_buttons, update_offer_keyboard
-from .updates import is_newer, latest_release, read_update_status
+from .updates import changelog_to_telegram_html, is_newer, latest_release, read_update_status
 
 
 class Notifier:
@@ -62,10 +62,14 @@ class Notifier:
         else:
             remain = f"Осталось: <b>{d} дн.</b>"
 
+        note = str(s.get("notes") or "").strip()
+        note_line = f"{e(emojis, 'notes')} Заметка: {h(note)}\n" if note else ""
+
         return (
             f"{head}\n\n"
             f"{e(emojis, 'server')} <b>{h(s['name'])}</b>\n"
-            f"{e(emojis, 'provider')} Хостер: {h(s['provider'] or '-')}\n\n"
+            f"{e(emojis, 'provider')} Хостер: {h(s['provider'] or '-')}\n"
+            f"{note_line}\n"
             f"Сумма: <b>{money(s['amount_minor'], s['currency'])}</b>\n"
             f"{e(emojis, 'calendar')} Дата: <b>{date.fromisoformat(s['next_due']).strftime('%d.%m.%y')}</b>\n"
             f"{remain}"
@@ -167,7 +171,7 @@ class Notifier:
             text = (
                 f"{e(emojis, 'warning')} <b>Заканчивается баланс</b>\n\n"
                 f"{e(emojis, 'server')} <b>{h(s['name'])}</b>\n"
-                f"{e(emojis, 'provider')} Хостер: {h(s.get('provider') or '-')}\n\n"
+                f"Хостер: {h(s.get('provider') or '-')}\n\n"
                 f"Остаток: <b>{money(remaining, s['currency'])}</b>\n"
                 f"Расход: <b>{money(daily, s['currency'])}/день</b>\n"
                 f"Хватит примерно на: <b>{days_left} дн.</b>"
@@ -268,18 +272,14 @@ class Notifier:
                 pass
         elif self.db.update_last_offered() == rel.version:
             return
-        notes = str(rel.notes or "").strip()
-        if len(notes) > 1800:
-            notes = notes[:1800].rstrip() + "…"
-        if not notes:
-            notes = "Изменения не указаны."
+        notes = changelog_to_telegram_html(rel.notes, limit=2800)
         asset_note = "" if rel.asset_url else "\n\n⚠️ В релизе пока нет установочного архива."
         text = (
             "⬆️ <b>Доступна новая версия VPS Bill</b>\n\n"
             f"Установлена: <b>{h(__version__)}</b>\n"
             f"Доступна: <b>{h(rel.version)}</b>\n\n"
             "<b>Что изменилось:</b>\n"
-            f"{h(notes)}{asset_note}"
+            f"{notes}{asset_note}"
         )
         markup = update_offer_keyboard(rel.version) if rel.asset_url else None
         ok, _ = await self._broadcast(text, markup)
@@ -300,10 +300,34 @@ class Notifier:
         method = details.get("method", "auto")
         port = details.get("port", str(self.db.monitor_tcp_port()))
         lines: list[str] = []
+
         if method in {"auto", "ping"}:
-            lines.append(f"Ping: <b>{'OK' if details.get('ping') == 'ok' else 'нет ответа'}</b>")
+            ping_status = details.get("ping", "skip")
+            ping_text = {
+                "ok": "OK",
+                "fail": "нет ответа",
+                "skip": "не проверялся",
+            }.get(ping_status, "неизвестно")
+            lines.append(f"Ping: <b>{ping_text}</b>")
+
         if method in {"auto", "tcp"}:
-            lines.append(f"TCP {h(port)}: <b>{'OK' if details.get('tcp') == 'ok' else 'недоступен'}</b>")
+            tcp_status = details.get("tcp", "skip")
+            if tcp_status == "ok":
+                tcp_text = "OK"
+            elif tcp_status == "refused":
+                tcp_text = "хост отвечает, порт закрыт"
+            elif tcp_status == "skip" and details.get("ping") == "ok":
+                tcp_text = "не проверялся (Ping OK)"
+            elif tcp_status == "skip":
+                tcp_text = "не проверялся"
+            elif tcp_status == "timeout":
+                tcp_text = "таймаут"
+            elif tcp_status == "invalid":
+                tcp_text = "некорректный IP"
+            else:
+                tcp_text = "нет соединения"
+            lines.append(f"TCP {h(port)}: <b>{tcp_text}</b>")
+
         return "\n".join(lines)
 
     async def _check_one_server(self, s: dict, sem: asyncio.Semaphore):
@@ -327,7 +351,8 @@ class Notifier:
             text = (
                 f"{e(emojis, 'status_up')} <b>СЕРВЕР ВОССТАНОВЛЕН</b>\n\n"
                 f"{e(emojis, 'server')} <b>{h(s['name'])}</b>\n"
-                f"{e(emojis, 'ip')} <code>{h(s['ip'])}</code>\n\n"
+                f"{e(emojis, 'ip')} <code>{h(s['ip'])}</code>\n"
+                f"Хостер: {h(s.get('provider') or '-')}\n\n"
                 "Сервер снова отвечает.\n"
                 f"{probe_summary}"
             )
