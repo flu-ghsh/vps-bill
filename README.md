@@ -1,4 +1,5 @@
-<img width="1774" height="887" alt="VPS BILL - контроль серверов в Telegram" src="https://github.com/user-attachments/assets/3aa1fb4b-5a3a-4afe-b7af-dc7f8ce69e10" />
+<img width="1419" height="710" src="https://github.com/user-attachments/assets/925ecfa4-28e9-4acb-a1ed-f313b5aed425" />
+
 
 
 # VPS Bill
