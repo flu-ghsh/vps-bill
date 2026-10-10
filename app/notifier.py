@@ -288,12 +288,23 @@ class Notifier:
             self.db.set_update_remind_after("")
 
     async def _probe(self, s: dict) -> tuple[bool, dict[str, str]]:
-        return await probe_host(
+        ok, details = await probe_host(
             str(s.get("ip") or "").strip(),
             method=self.db.monitor_method(),
             port=self.db.monitor_tcp_port(),
             timeout=self.db.monitor_timeout(),
         )
+        tcp_status = details.get("tcp")
+        if tcp_status in {"timeout", "error", "invalid"}:
+            name = str(s.get("name") or "").strip().replace("\n", " ").replace("\r", " ") or "Без названия"
+            ip = str(s.get("ip") or "").strip()
+            port = details.get("port", "?")
+            label = {"timeout": "TIMEOUT", "error": "NETWORK ERROR", "invalid": "INVALID IP"}[tcp_status]
+            print(
+                f"[MONITOR] {name} | {ip}:{port} | TCP {label} | результат проверки доступности",
+                flush=True,
+            )
+        return ok, details
 
 
     def _probe_summary(self, details: dict[str, str]) -> str:

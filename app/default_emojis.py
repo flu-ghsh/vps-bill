@@ -3,19 +3,19 @@ from __future__ import annotations
 # Built-in premium/custom emoji defaults for VPS Bill.
 # User overrides stored in SQLite take precedence over these values.
 DEFAULT_CUSTOM_EMOJIS: dict[str, str] = {
-    "dictionaries": "5938195768832692153",
-    "update": "6039802767931871481",
-    "cabinet": "5884343982816759327",
     "add": "5775937998948404844",
     "analytics": "5931472654660800739",
+    "archive": "6021856393114426113",
     "back": "5875082500023258804",
     "backup": "5877316724830768997",
     "brand": "5994750571041525522",
+    "cabinet": "5884343982816759327",
     "calendar": "5985833664884250583",
     "cancel": "5985346521103604145",
     "country": "5883955653348692941",
     "cycle": "5985616167740379273",
     "delete": "5879896690210639947",
+    "dictionaries": "5938195768832692153",
     "edit": "5879841310902324730",
     "emoji": "5775949822993371030",
     "ip": "5778661935927004845",
@@ -26,6 +26,7 @@ DEFAULT_CUSTOM_EMOJIS: dict[str, str] = {
     "payments": "6030443364178992166",
     "provider": "5778311685638984859",
     "purge": "5879937509579820068",
+    "purpose": "5883973610606956186",
     "reminders": "5909201569898827582",
     "reports": "5994378914636500516",
     "reset": "5843908536467198016",
@@ -41,5 +42,6 @@ DEFAULT_CUSTOM_EMOJIS: dict[str, str] = {
     "status_up": "6023940002008799618",
     "tags": "5854776233950188167",
     "trash": "5879915802815107172",
+    "update": "6039802767931871481",
     "warning": "5881702736843511327",
 }

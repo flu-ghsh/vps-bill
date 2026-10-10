@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 from aiogram import BaseMiddleware, Bot, Dispatcher
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
@@ -21,14 +22,28 @@ class AdminOnlyMiddleware(BaseMiddleware):
         self.admin_ids = admin_ids
 
     async def __call__(self, handler, event, data):
-        user = getattr(event, "from_user", None)
-        if not user or user.id not in self.admin_ids:
-            if isinstance(event, CallbackQuery):
-                await event.answer("Нет доступа", show_alert=True)
-            elif isinstance(event, Message):
-                await event.answer("⛔ Доступ запрещён")
-            return None
-        return await handler(event, data)
+        try:
+            user = getattr(event, "from_user", None)
+            if not user or user.id not in self.admin_ids:
+                if isinstance(event, CallbackQuery):
+                    await event.answer("Нет доступа", show_alert=True)
+                elif isinstance(event, Message):
+                    await event.answer("⛔ Доступ запрещён")
+                return None
+            return await handler(event, data)
+        except TelegramBadRequest as exc:
+            reason = str(exc).lower()
+            if isinstance(event, CallbackQuery) and (
+                "query is too old" in reason
+                or "query id is invalid" in reason
+                or "query_id_invalid" in reason
+            ):
+                print(
+                    f"[TELEGRAM] Устаревший callback: {(event.data or 'unknown')[:120]} — пропущен",
+                    flush=True,
+                )
+                return None
+            raise
 
 
 async def main() -> None:

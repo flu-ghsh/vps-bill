@@ -63,11 +63,10 @@ async def tcp_probe_detailed(ip: str, port: int, timeout: int) -> tuple[bool, st
         return True, "ok"
     except ConnectionRefusedError:
         return True, "refused"
-    except asyncio.TimeoutError as exc:
-        print(f"tcp {ip}:{port} timeout: {exc}", flush=True)
+    except asyncio.TimeoutError:
+        # The caller has server metadata and logs this as a monitoring result.
         return False, "timeout"
-    except OSError as exc:
-        print(f"tcp {ip}:{port} failed: {exc}", flush=True)
+    except OSError:
         return False, "error"
 
 

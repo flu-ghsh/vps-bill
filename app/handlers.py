@@ -402,7 +402,7 @@ class BotHandlers:
             rows.append(nav)
         archive_n = self.db.archive_count()
         archive_label = f"Архив · {archive_n}" if archive_n else "Архив"
-        rows.append([button(emojis, "server", archive_label, "archive")])
+        rows.append([button(emojis, "archive", archive_label, "archive")])
         trash_n = self.db.trash_count()
         if trash_n:
             rows.append([button(emojis, "trash", f"Корзина · {trash_n}", "trash")])
@@ -1803,18 +1803,18 @@ class BotHandlers:
         await q.answer()
         sid=int(q.data.split(":",1)[1]); srv=self.db.get_server(sid)
         if not srv: return
-        await q.message.edit_text(f"{e(self.emojis, 'server')} <b>Переместить в архив?</b>\n\n{h(srv['name'])}\n\nИстория платежей сохранится в аналитике.", reply_markup=kb([[button(self.emojis,"server","В архив",f"archiveyes:{sid}",style="success")],[button(self.emojis,"cancel","Отмена",f"srvopen:{sid}")]]))
+        await q.message.edit_text(f"{e(self.emojis, 'archive')} <b>Переместить в архив?</b>\n\n{h(srv['name'])}\n\nИстория платежей сохранится в аналитике.", reply_markup=kb([[button(self.emojis,"archive","В архив",f"archiveyes:{sid}",style="success")],[button(self.emojis,"cancel","Отмена",f"srvopen:{sid}")]]))
 
     async def archive_yes(self, q: CallbackQuery):
         sid=int(q.data.split(":",1)[1]); self.db.archive_server(sid); await q.answer("Перемещено в архив")
-        items=self.db.list_archive(); await q.message.edit_text(f"{e(self.emojis, 'server')} <b>Архив</b>\n\nСерверов: <b>{len(items)}</b>", reply_markup=archive_list_keyboard(items,self.emojis))
+        items=self.db.list_archive(); await q.message.edit_text(f"{e(self.emojis, 'archive')} <b>Архив</b>\n\nСерверов: <b>{len(items)}</b>", reply_markup=archive_list_keyboard(items,self.emojis))
 
     async def archive_page(self, q: CallbackQuery):
         await q.answer(); items=self.db.list_archive(); page=0
         if q.data and q.data.startswith("archive:page:"):
             try: page=int(q.data.rsplit(":",1)[1])
             except ValueError: page=0
-        await q.message.edit_text(f"{e(self.emojis, 'server')} <b>Архив VPS</b>\n\nСерверов: <b>{len(items)}</b>\nИстория оплат сохранена и продолжает учитываться в фактических расходах.", reply_markup=archive_list_keyboard(items,self.emojis,page=page))
+        await q.message.edit_text(f"{e(self.emojis, 'archive')} <b>Архив VPS</b>\n\nСерверов: <b>{len(items)}</b>\nИстория оплат сохранена и продолжает учитываться в фактических расходах.", reply_markup=archive_list_keyboard(items,self.emojis,page=page))
 
     async def archive_item(self, q: CallbackQuery):
         await q.answer(); sid=int(q.data.split(":",1)[1]); srv=self.db.get_server(sid)
@@ -1827,7 +1827,7 @@ class BotHandlers:
 
     async def archive_to_trash(self, q: CallbackQuery):
         sid=int(q.data.split(":",1)[1]); self.db.archive_to_trash(sid); await q.answer("Перемещено в корзину")
-        items=self.db.list_archive(); await q.message.edit_text(f"{e(self.emojis, 'server')} <b>Архив VPS</b>\n\nСерверов: <b>{len(items)}</b>", reply_markup=archive_list_keyboard(items,self.emojis))
+        items=self.db.list_archive(); await q.message.edit_text(f"{e(self.emojis, 'archive')} <b>Архив VPS</b>\n\nСерверов: <b>{len(items)}</b>", reply_markup=archive_list_keyboard(items,self.emojis))
 
     async def trash_ask(self, q: CallbackQuery):
         sid = int(q.data.split(":", 1)[1])

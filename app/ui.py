@@ -12,6 +12,7 @@ from .billing import cycle_label, days_until, money
 EMOJI_SLOTS: dict[str, tuple[str, str]] = {
     "brand": ("💎", "Логотип"),
     "server": ("🖥", "Серверы"),
+    "archive": ("📦", "Архив"),
     "payments": ("💳", "Платежи"),
     "analytics": ("📊", "Аналитика"),
     "add": ("➕", "Добавить"),
@@ -161,7 +162,7 @@ def server_buttons(server_id: int, emojis: dict[str, str], *, balance_mode: bool
         ])
     if balance_mode:
         rows.append([button(emojis, "edit", "Данные", f"details:{server_id}")])
-    rows.append([button(emojis, "server", "В архив", f"archiveask:{server_id}")])
+    rows.append([button(emojis, "archive", "В архив", f"archiveask:{server_id}")])
     rows.append([button(emojis, "trash", "В корзину", f"trashask:{server_id}", style="danger")])
     rows.append([button(emojis, "back", "К серверам", "servers")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -698,7 +699,7 @@ def server_card(server: dict, emojis: dict[str, str]) -> str:
         state = f"{e(emojis, 'trash')} в корзине"
         when = "не участвует в напоминаниях"
     elif server.get("archived_at"):
-        state = "📦 в архиве"
+        state = f"{e(emojis, 'archive')} в архиве"
         when = "не участвует в напоминаниях"
     elif d < 0:
         state = f"{e(emojis, 'status_overdue')} <b>ПРОСРОЧЕНО</b>"
