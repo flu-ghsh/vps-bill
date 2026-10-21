@@ -8,7 +8,7 @@ from aiogram.enums import MessageEntityType
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from . import __version__
 from .backup_archive import create_backup_archive, delete_old_backup_files
@@ -235,7 +235,11 @@ class BotHandlers:
         r.callback_query.register(self.server, F.data.startswith("srvopen:"))
         r.callback_query.register(self.server, F.data.startswith("server:"))  # legacy callbacks from old messages
         r.callback_query.register(self.upcoming, F.data == "upcoming")
-        r.callback_query.register(self.payments, F.data == "payments")
+        r.callback_query.register(self.payments, (F.data == "payments") | F.data.startswith("payments:month:"))
+        r.callback_query.register(self.payments_manage, F.data.startswith("payments:manage:"))
+        r.callback_query.register(self.payment_detail, F.data.startswith("payments:item:"))
+        r.callback_query.register(self.payment_delete_ask, F.data.startswith("payments:ask:"))
+        r.callback_query.register(self.payment_delete_confirm, F.data.startswith("payments:yes:"))
         r.callback_query.register(self.analytics, F.data == "analytics")
 
         r.callback_query.register(self.settings_page, F.data == "settings")
@@ -466,17 +470,207 @@ class BotHandlers:
             lines.append("На ближайшие 30 дней оплат нет.")
         await q.message.edit_text("\n".join(lines).rstrip(), reply_markup=back_main(emojis), disable_web_page_preview=True)
 
-    async def payments(self, q: CallbackQuery):
+    async def payments_manage(self, q: CallbackQuery):
+        """Selection menu: destructive payment actions stay out of the history."""
+        await self.payments(q, manage=True)
+
+    async def payments(self, q: CallbackQuery, *, month_override=None, skip_answer=False, manage=False):
+        if not skip_answer:
+            await q.answer()
+        today_month = self.today.replace(day=1)
+        callback = str(q.data or "payments")
+        if month_override is not None:
+            ym, page_override = month_override
+            callback = f"payments:month:{ym}:{page_override}"
+        if callback.startswith("payments:manage:"):
+            manage = True
+        month = today_month
+        page = 0
+        if callback.startswith(("payments:month:", "payments:manage:")):
+            pieces = callback.split(":")
+            try:
+                if len(pieces) != 4:
+                    raise ValueError
+                month = date.fromisoformat(pieces[2] + "-01")
+                page = int(pieces[3])
+            except ValueError:
+                return await q.message.edit_text("Некорректный месяц.", reply_markup=back_main(self.emojis))
+        if month > today_month or month.year < 2000 or not 0 <= page <= 9999:
+            return await q.message.edit_text("Некорректный месяц.", reply_markup=back_main(self.emojis))
+
+        # Months are consecutive, including empty months between recorded payments.
+        earliest = self.db.earliest_payment_month() or today_month
+        earliest = max(date(2000, 1, 1), min(earliest, today_month))
+        if month < earliest:
+            month = earliest
+            page = 0
+        next_month = (month + timedelta(days=32)).replace(day=1)
+        previous_month = (month - timedelta(days=1)).replace(day=1)
+        payments = list(reversed(self.db.payments_between(month.isoformat(), next_month.isoformat())))
+        month_names = (
+            "январь", "февраль", "март", "апрель", "май", "июнь",
+            "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+        )
+        heading = "Удаление платежей" if manage else "История оплат"
+        lines = [
+            f"{e(self.emojis, 'payments')} <b>{heading}</b>",
+            f"<b>{month_names[month.month - 1].capitalize()} {month.year}</b>",
+            f"Записей: {len(payments)}",
+            "",
+        ]
+        keyboard: list[list[InlineKeyboardButton]] = []
+        if manage:
+            # Telegram caps inline keyboards at 100 buttons. Most months fit on
+            # one screen; for exceptionally busy months use text-only controls.
+            per_page = 80
+            pages = max(1, (len(payments) + per_page - 1) // per_page)
+            page = min(page, pages - 1)
+            batch = payments[page * per_page:(page + 1) * per_page]
+            lines.append("Выберите платёж, который нужно удалить:" if batch else "В этом месяце оплат нет.")
+            for payment in batch:
+                paid_at = datetime.fromisoformat(payment["paid_at"]).strftime("%d.%m.%Y")
+                label = f"{str(payment['name'])[:24]} · {paid_at} · {money(payment['amount_minor'], payment['currency'])}"
+                keyboard.append([button(
+                    self.emojis, "delete", label,
+                    f"payments:item:{payment['id']}:{month:%Y-%m}:{page}", style="danger",
+                )])
+            if pages > 1:
+                page_controls = []
+                if page > 0:
+                    page_controls.append(InlineKeyboardButton(
+                        text="Предыдущие платежи", callback_data=f"payments:manage:{month:%Y-%m}:{page - 1}"
+                    ))
+                if page < pages - 1:
+                    page_controls.append(InlineKeyboardButton(
+                        text="Ещё платежи", callback_data=f"payments:manage:{month:%Y-%m}:{page + 1}"
+                    ))
+                keyboard.append(page_controls)
+        else:
+            # Show ALL payments for the chosen month without page navigation.
+            # Telegram messages are limited to 4096 characters; for a month
+            # exceeding that size attach a complete text export instead.
+            for payment in payments:
+                paid_at = datetime.fromisoformat(payment["paid_at"]).strftime("%d.%m.%Y")
+                lines.append(
+                    f"• {paid_at} · <b>{h(payment['name'])}</b> · "
+                    f"{h(money(payment['amount_minor'], payment['currency']))}"
+                )
+            if not payments:
+                lines.append("В этом месяце оплат нет.")
+            if len("\n".join(lines)) > 3800:
+                export = [f"История оплат за {month:%m.%Y}", f"Записей: {len(payments)}", ""]
+                for payment in payments:
+                    paid_at = datetime.fromisoformat(payment["paid_at"]).strftime("%d.%m.%Y")
+                    export.append(
+                        f"{paid_at} | {payment['name']} | {money(payment['amount_minor'], payment['currency'])}"
+                    )
+                await q.message.answer_document(
+                    BufferedInputFile(
+                        "\n".join(export).encode("utf-8"), filename=f"payments-{month:%Y-%m}.txt"
+                    ),
+                    caption=f"Полная история за {month:%m.%Y} — {len(payments)} платежей",
+                )
+                lines = lines[:4] + ["Список слишком длинный для сообщения Telegram. Все платежи месяца отправлены одним файлом."]
+
+        # Only a single month navigation row: no 1/N counters or extra arrows.
+        if earliest < today_month:
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"‹ {previous_month:%m.%Y}" if month > earliest else f"‹ {month:%m.%Y}",
+                    callback_data=f"payments:{'manage' if manage else 'month'}:{previous_month:%Y-%m}:0" if month > earliest else "noop",
+                ),
+                InlineKeyboardButton(
+                    text=f"{next_month:%m.%Y} ›" if month < today_month else f"{month:%m.%Y} ›",
+                    callback_data=f"payments:{'manage' if manage else 'month'}:{next_month:%Y-%m}:0" if month < today_month else "noop",
+                ),
+            ])
+        if manage:
+            keyboard.append([button(
+                self.emojis, "back", "К истории", f"payments:month:{month:%Y-%m}:0"
+            )])
+        else:
+            keyboard.append([button(
+                self.emojis, "delete", "Удаление платежей", f"payments:manage:{month:%Y-%m}:0"
+            )])
+            keyboard.extend(back_main(self.emojis).inline_keyboard)
+        await q.message.edit_text("\n".join(lines), reply_markup=kb(keyboard))
+
+    async def payment_detail(self, q: CallbackQuery):
+        parts = str(q.data or "").split(":")
+        try:
+            if len(parts) != 5 or parts[0:2] != ["payments", "item"]:
+                raise ValueError
+            payment_id, ym, page = int(parts[2]), parts[3], int(parts[4])
+            date.fromisoformat(ym + "-01")
+            if payment_id <= 0 or not 0 <= page <= 9999:
+                raise ValueError
+        except ValueError:
+            return await q.answer("Некорректный платёж", show_alert=True)
         await q.answer()
-        emojis = self.emojis
-        rows = self.db.recent_payments(25)
-        lines = [f"{e(emojis, 'payments')} <b>История оплат</b>", ""]
-        for p in rows:
-            pd = datetime.fromisoformat(p["paid_at"]).strftime("%d.%m.%y")
-            lines.append(f"• {pd} · <b>{h(p['name'])}</b> · {money(p['amount_minor'], p['currency'])}")
-        if len(lines) == 2:
-            lines.append("Оплат пока нет.")
-        await q.message.edit_text("\n".join(lines), reply_markup=back_main(emojis))
+        payment = self.db.get_payment(payment_id)
+        if not payment:
+            return await q.message.edit_text(
+                "Запись уже удалена.",
+                reply_markup=kb([[button(self.emojis, "back", "К списку", f"payments:manage:{ym}:{page}")]])
+            )
+        paid_at = datetime.fromisoformat(payment["paid_at"]).strftime("%d.%m.%Y %H:%M")
+        text = (
+            f"{e(self.emojis, 'payments')} <b>Платёж #{payment_id}</b>\n\n"
+            f"Сервер: <b>{h(payment['name'])}</b>\n"
+            f"Сумма: <b>{h(money(payment['amount_minor'], payment['currency']))}</b>\n"
+            f"Дата: <b>{h(paid_at)}</b>\n\n"
+            "Удаление уберёт запись из истории и аналитики, "
+            "но <b>не изменит дату следующей оплаты и баланс VPS</b>."
+        )
+        await q.message.edit_text(text, reply_markup=kb([
+            [button(self.emojis, "delete", "Удалить платёж", f"payments:ask:{payment_id}:{ym}:{page}", style="danger")],
+            [button(self.emojis, "back", "К списку", f"payments:manage:{ym}:{page}")],
+        ]))
+
+    async def payment_delete_ask(self, q: CallbackQuery):
+        parts = str(q.data or "").split(":")
+        try:
+            if len(parts) != 5:
+                raise ValueError
+            payment_id, ym, page = int(parts[2]), parts[3], int(parts[4])
+            date.fromisoformat(ym + "-01")
+            if payment_id <= 0 or not 0 <= page <= 9999:
+                raise ValueError
+        except ValueError:
+            return await q.answer("Некорректный платёж", show_alert=True)
+        await q.answer()
+        payment = self.db.get_payment(payment_id)
+        if not payment:
+            return await q.message.edit_text(
+                "Платёж уже удалён.", reply_markup=kb([
+                    [button(self.emojis, "back", "К списку", f"payments:manage:{ym}:{page}")]
+                ]))
+        text = (
+            f"{e(self.emojis, 'warning')} <b>Удалить платёж без восстановления?</b>\n\n"
+            f"{h(payment['name'])} · "
+            f"{h(money(payment['amount_minor'], payment['currency']))}\n\n"
+            "Удаляется только запись об оплате. Дата следующей оплаты и баланс не изменятся."
+        )
+        await q.message.edit_text(text, reply_markup=kb([
+            [button(self.emojis, "delete", "Да, удалить", f"payments:yes:{payment_id}:{ym}:{page}", style="danger")],
+            [button(self.emojis, "cancel", "Отмена", f"payments:item:{payment_id}:{ym}:{page}")],
+        ]))
+
+    async def payment_delete_confirm(self, q: CallbackQuery):
+        parts = str(q.data or "").split(":")
+        try:
+            if len(parts) != 5:
+                raise ValueError
+            payment_id, ym, page = int(parts[2]), parts[3], int(parts[4])
+            date.fromisoformat(ym + "-01")
+            if payment_id <= 0 or not 0 <= page <= 9999:
+                raise ValueError
+        except ValueError:
+            return await q.answer("Некорректный платёж", show_alert=True)
+        deleted = self.db.delete_payment(payment_id)
+        await q.answer("Платёж удалён" if deleted else "Платёж уже удалён", show_alert=True)
+        # Render the same month, staying on the nearest existing page.
+        await self.payments(q, month_override=(ym, page), skip_answer=True, manage=True)
 
     async def analytics(self, q: CallbackQuery):
         await q.answer()
@@ -559,6 +753,7 @@ class BotHandlers:
         reminder_text = ", ".join(str(x) for x in self.db.get_reminder_days()) or "выключены"
         cycle_labels = {
             "daily": "день", "weekly": "неделя", "monthly": "месяц",
+            "days30": "30 дней", "days31": "31 день",
             "quarterly": "3 мес.", "semiannual": "6 мес.", "yearly": "год",
         }
         cycle_text = ", ".join(cycle_labels.get(x, x) for x in self.db.get_billing_cycles())
@@ -832,6 +1027,8 @@ class BotHandlers:
             "daily": "ежедневно",
             "weekly": "1 неделя",
             "monthly": "1 месяц",
+            "days30": "30 дней",
+            "days31": "31 день",
             "quarterly": "3 месяца",
             "semiannual": "6 месяцев",
             "yearly": "1 год",
@@ -847,7 +1044,7 @@ class BotHandlers:
 
     async def billing_cycle_toggle(self, q: CallbackQuery):
         cycle = q.data.rsplit(":", 1)[1]
-        allowed = {"daily", "weekly", "monthly", "quarterly", "semiannual", "yearly"}
+        allowed = {"daily", "weekly", "monthly", "days30", "days31", "quarterly", "semiannual", "yearly"}
         if cycle not in allowed:
             return await q.answer("Неизвестный период", show_alert=True)
         enabled = set(self.db.get_billing_cycles())

@@ -10,7 +10,9 @@ def test_builtin_emoji_defaults_are_loaded(tmp_path: Path):
     assert emojis["brand"] == "5994750571041525522"
     assert emojis["server"] == "6019462434178211398"
     assert emojis["monitor"] == "5924681813149618024"
-    assert "purpose" not in DEFAULT_CUSTOM_EMOJIS
+    # Purpose and Archive have been built-in since VPS Bill 2.5.28.
+    assert emojis["purpose"] == "5883973610606956186"
+    assert emojis["archive"] == "6021856393114426113"
 
 
 def test_db_override_wins_and_reset_returns_default(tmp_path: Path):

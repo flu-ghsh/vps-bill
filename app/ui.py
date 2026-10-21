@@ -410,6 +410,8 @@ CYCLE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("daily", "Ежедневно"),
     ("weekly", "1 неделя"),
     ("monthly", "1 месяц"),
+    ("days30", "30 дней"),
+    ("days31", "31 день"),
     ("quarterly", "3 месяца"),
     ("semiannual", "6 месяцев"),
     ("yearly", "1 год"),

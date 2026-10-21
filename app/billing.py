@@ -47,6 +47,10 @@ def next_due(current: str, cycle: str, cycle_days: int | None = None) -> str:
         d = d + timedelta(weeks=1)
     elif cycle == "monthly":
         d = d + relativedelta(months=1)
+    elif cycle == "days30":
+        d = d + timedelta(days=30)
+    elif cycle == "days31":
+        d = d + timedelta(days=31)
     elif cycle == "quarterly":
         d = d + relativedelta(months=3)
     elif cycle == "semiannual":
@@ -72,6 +76,8 @@ def cycle_label(cycle: str, cycle_days: int | None = None) -> str:
         "daily": "ежедневно",
         "weekly": "раз в неделю",
         "monthly": "ежемесячно",
+        "days30": "каждые 30 дней",
+        "days31": "каждые 31 день",
         "quarterly": "раз в 3 месяца",
         "semiannual": "раз в 6 месяцев",
         "yearly": "ежегодно",
@@ -96,6 +102,10 @@ def monthly_equivalent_minor(amount_minor: int, cycle: str, cycle_days: int | No
         factor = Decimal(52) / Decimal(12)
     elif cycle == "monthly":
         factor = Decimal(1)
+    elif cycle == "days30":
+        factor = Decimal(365) / Decimal(12 * 30)
+    elif cycle == "days31":
+        factor = Decimal(365) / Decimal(12 * 31)
     elif cycle == "quarterly":
         factor = Decimal(1) / Decimal(3)
     elif cycle == "semiannual":

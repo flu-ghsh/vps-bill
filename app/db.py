@@ -542,6 +542,21 @@ class Database:
         finally:
             c.close()
 
+    def get_payment(self, payment_id: int) -> dict | None:
+        with self.conn() as c:
+            row = c.execute(
+                "SELECT p.*, s.name, s.provider FROM payments p "
+                "JOIN servers s ON s.id=p.server_id WHERE p.id=?",
+                (int(payment_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def delete_payment(self, payment_id: int) -> bool:
+        """Remove only a history record. Never mutate server next_due or balance."""
+        with self.conn() as c:
+            cur = c.execute("DELETE FROM payments WHERE id=?", (int(payment_id),))
+            return cur.rowcount == 1
+
     def recent_payments(self, limit: int = 30) -> list[dict]:
         with self.conn() as c:
             rows = c.execute(
@@ -549,6 +564,17 @@ class Database:
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def earliest_payment_month(self) -> date | None:
+        """Calendar month of the earliest recorded payment, if any."""
+        with self.conn() as c:
+            row = c.execute("SELECT MIN(substr(paid_at, 1, 7)) FROM payments").fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            return date.fromisoformat(str(row[0]) + "-01")
+        except ValueError:
+            return None
 
     def payments_between(self, start_iso: str, end_iso: str) -> list[dict]:
         with self.conn() as c:
@@ -643,7 +669,7 @@ class Database:
 
 
     def get_billing_cycles(self) -> tuple[str, ...]:
-        allowed = ("daily", "weekly", "monthly", "quarterly", "semiannual", "yearly")
+        allowed = ("daily", "weekly", "monthly", "days30", "days31", "quarterly", "semiannual", "yearly")
         raw = self.get_setting("billing_cycles", DEFAULT_SETTINGS["billing_cycles"])
         selected = {part.strip() for part in raw.split(",") if part.strip() in allowed}
         # Preserve a stable, user-friendly order independent of DB text ordering.
@@ -651,7 +677,7 @@ class Database:
         return ordered or ("weekly", "monthly", "quarterly", "yearly")
 
     def set_billing_cycles(self, cycles: list[str] | tuple[str, ...]) -> None:
-        allowed = ("daily", "weekly", "monthly", "quarterly", "semiannual", "yearly")
+        allowed = ("daily", "weekly", "monthly", "days30", "days31", "quarterly", "semiannual", "yearly")
         selected = {str(c).strip() for c in cycles if str(c).strip() in allowed}
         ordered = [c for c in allowed if c in selected]
         # Never allow an empty creation menu.
