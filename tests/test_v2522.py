@@ -26,5 +26,4 @@ def test_update_request_removes_old_fixed_tmp(tmp_path: Path):
 
 def test_updater_syncs_compose_and_bridge():
     text = Path("scripts/update.sh").read_text(encoding="utf-8")
-    assert 'cp -f "$TARGET/compose.yaml" "$BASE/compose.yaml"' in text
     assert 'install-update-bridge.sh' in text

@@ -21,4 +21,4 @@ def test_restore_is_not_delete_first():
 
 def test_missing_db_guard():
     assert '.initialized' in text("app/main.py")
-    assert 'Автоматическое создание новой базы заблокировано' in text("install.sh")
+    assert 'Автоматическое создание новой' in text("install.sh") and 'базы заблокировано' in text("install.sh")

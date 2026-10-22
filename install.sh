@@ -189,9 +189,9 @@ mkdir -p \
   "$BASE" \
   "$BASE/data" \
   "$BASE/backups" \
-  "$BASE/releases" \
-  "$BASE/update-requests"
+  "$BASE/releases"
 
+install -d -o 10001 -g 10001 -m 0770 "$BASE/update-requests"
 chown -R 10001:10001 "$BASE/data" "$BASE/backups" "$BASE/update-requests"
 chmod 0770 "$BASE/update-requests"
 

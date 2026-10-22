@@ -18,7 +18,8 @@ def test_update_request_uses_unique_tmp_and_is_atomic(tmp_path: Path):
 
 
 def test_compose_update_requests_mount_is_explicitly_rw():
-    text = Path("compose.yaml").read_text(encoding="utf-8")
+    compose_path = Path("compose.yaml") if Path("compose.yaml").exists() else Path("compose.example.yaml")
+    text = compose_path.read_text(encoding="utf-8")
     assert "/opt/vps-bill/update-requests:/app/update-requests:rw" in text
 
 
