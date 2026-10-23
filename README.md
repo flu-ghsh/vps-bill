@@ -40,11 +40,6 @@ vps-bill-backup
 vps-bill-restore
 ```
 
-Текущая версия:
-
-```bash
-cat /opt/vps-bill/current/VERSION
-```
 
 ## Данные
 
