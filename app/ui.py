@@ -21,6 +21,7 @@ EMOJI_SLOTS: dict[str, tuple[str, str]] = {
     "dictionaries": ("📚", "Справочники"),
     "update": ("⬆️", "Обновление"),
     "paid": ("✅", "Оплачено"),
+    "success": ("✅", "Удачно"),
     "snooze": ("⏰", "Напомнить"),
     "delete": ("🗑", "Удалить"),
     "cancel": ("❌", "Отмена"),
@@ -151,6 +152,7 @@ def server_buttons(server_id: int, emojis: dict[str, str], *, balance_mode: bool
     rows: list[list[InlineKeyboardButton]] = []
     if balance_mode:
         rows.append([button(emojis, "payments", "Пополнил баланс", f"balance:topup:{server_id}", style="success")])
+        rows.append([button(emojis, "money", "Изменить баланс", f"balance:adjust:{server_id}")])
     else:
         rows.append([
             button(emojis, "paid", "Оплатил", f"paid:{server_id}", style="success"),
@@ -168,7 +170,7 @@ def server_buttons(server_id: int, emojis: dict[str, str], *, balance_mode: bool
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def server_details_keyboard(server_id: int, emojis: dict[str, str], *, has_ip: bool = False, has_country: bool = False, has_tags: bool = False, has_notes: bool = False, monitor_enabled: bool = False) -> InlineKeyboardMarkup:
+def server_details_keyboard(server_id: int, emojis: dict[str, str], *, has_ip: bool = False, has_country: bool = False, has_tags: bool = False, has_notes: bool = False, monitor_enabled: bool = False, balance_mode: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [button(emojis, "edit", "Имя", f"editfield:{server_id}:name", style="success")],
         [
@@ -178,6 +180,10 @@ def server_details_keyboard(server_id: int, emojis: dict[str, str], *, has_ip: b
         [button(emojis, "tags", "Теги", f"tag:choose:{server_id}", style="success" if has_tags else None)],
         [button(emojis, "notes", "Заметка", f"editfield:{server_id}:notes", style="success" if has_notes else None)],
     ]
+    if balance_mode:
+        rows.append([button(emojis, "money", "Стоимость за сутки", f"dailyprice:open:{server_id}", style="success")])
+    else:
+        rows.append([button(emojis, "money", "Стоимость и период", f"tariff:open:{server_id}", style="success")])
     if has_ip:
         rows.append([button(emojis, "monitor", f"Мониторинг: {'ВКЛ' if monitor_enabled else 'ВЫКЛ'}", f"monitor:server:{server_id}", style="success" if monitor_enabled else None)])
     rows.append([button(emojis, "back", "К карточке", f"srvopen:{server_id}")])
@@ -284,6 +290,7 @@ def monitoring_settings_keyboard(
         callback_data=f"monitor:recovery:{x}",
         style="success" if enabled and recovery == x else None,
     ) for x in (1, 2, 3)])
+    rows.append([button(emojis, "monitor", "Проверить доступность сейчас", "monitor:checknow", style="primary")])
     rows.append([button(emojis, "back", "К настройкам", "settings")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -431,6 +438,23 @@ def cycle_keyboard(emojis: dict[str, str], enabled: tuple[str, ...]) -> InlineKe
         ]
         rows.append(row)
     rows.append([button(emojis, "cancel", "Отмена", "flow:cancel", style="danger")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def tariff_cycle_keyboard(server_id: int, emojis: dict[str, str], enabled: tuple[str, ...], *, current_cycle: str, current_days: int | None = None) -> InlineKeyboardMarkup:
+    """Choose a new billing cycle; existing disabled cycle remains selectable."""
+    available = set(enabled) | {current_cycle}
+    options = [(key, label) for key, label in CYCLE_OPTIONS if key in available]
+    if current_cycle == "custom" and current_days and current_days > 0:
+        options.append(("custom", f"Каждые {current_days} дн."))
+    rows = []
+    for i in range(0, len(options), 2):
+        rows.append([
+            button(emojis, "cycle", ("✓ " if key == current_cycle else "") + label,
+                   f"tariff:cycle:{server_id}:{key}", style="success" if key == current_cycle else None)
+            for key, label in options[i:i + 2]
+        ])
+    rows.append([button(emojis, "cancel", "Отмена", f"tariff:cancel:{server_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

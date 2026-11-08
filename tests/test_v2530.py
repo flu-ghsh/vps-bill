@@ -214,7 +214,7 @@ class PaymentNavigationTests(unittest.TestCase):
 
     def test_changelog_without_dates_and_preserving_history(self):
         changelog = (Path(__file__).parents[1] / "CHANGELOG.md").read_text()
-        self.assertTrue(changelog.startswith("# Changelog\n\n## 2.5.31\n"))
+        self.assertTrue(changelog.startswith("# Changelog\n\n## 2.5.36\n"))
         self.assertTrue(changelog.index("## 2.5.31") < changelog.index("## 2.5.30") < changelog.index("## 2.5.29") < changelog.index("## 2.5.28"))
         self.assertNotIn("## 2.5.31 —", changelog)
 

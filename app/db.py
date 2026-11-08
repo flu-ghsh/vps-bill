@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .default_emojis import DEFAULT_CUSTOM_EMOJIS
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 SCHEMA = r'''
 PRAGMA foreign_keys=ON;
@@ -53,6 +53,18 @@ CREATE TABLE IF NOT EXISTS payments (
   note TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_payments_paid ON payments(paid_at);
+CREATE TABLE IF NOT EXISTS daily_rate_history (
+  server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  effective_day TEXT NOT NULL,
+  amount_minor INTEGER NOT NULL,
+  PRIMARY KEY(server_id, effective_day)
+);
+CREATE TABLE IF NOT EXISTS daily_monthly_ledger (
+  server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  month TEXT NOT NULL,
+  payment_id INTEGER REFERENCES payments(id) ON DELETE SET NULL,
+  PRIMARY KEY(server_id, month)
+);
 CREATE TABLE IF NOT EXISTS notification_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
@@ -194,6 +206,15 @@ class Database:
                 if column not in existing:
                     c.execute(f"ALTER TABLE servers ADD COLUMN {column} {ddl}")
             c.execute("CREATE INDEX IF NOT EXISTS idx_servers_deleted ON servers(deleted_at)")
+            # Existing balance-mode VPS start daily usage accounting from upgrade day.
+            # Never fabricate historical daily rates that were not tracked before v2.5.33.
+            c.execute(
+                "INSERT OR IGNORE INTO daily_rate_history(server_id,effective_day,amount_minor) "
+                "SELECT id,?,amount_minor FROM servers WHERE cycle='daily' AND billing_mode='balance' "
+                "AND deleted_at IS NULL AND NOT EXISTS "
+                "(SELECT 1 FROM daily_rate_history r WHERE r.server_id=servers.id)",
+                (date.today().isoformat(),),
+            )
             ts = now_iso()
             for key, value in DEFAULT_SETTINGS.items():
                 c.execute(
@@ -250,7 +271,13 @@ class Database:
                 "INSERT INTO servers(name,provider,amount_minor,currency,next_due,cycle,cycle_days,notes,billing_mode,balance_minor,balance_alert_days,balance_updated_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name.strip(), provider.strip(), amount_minor, currency, next_due, cycle, cycle_days, notes.strip(), billing_mode, int(balance_minor), int(balance_alert_days), ts if billing_mode == "balance" else None, ts, ts),
             )
-            return int(cur.lastrowid)
+            sid = int(cur.lastrowid)
+            if billing_mode == "balance" and cycle == "daily":
+                c.execute(
+                    "INSERT INTO daily_rate_history(server_id,effective_day,amount_minor) VALUES(?,?,?)",
+                    (sid, date.today().isoformat(), amount_minor),
+                )
+            return sid
 
 
     def demo_server_ids(self) -> list[int]:
@@ -431,6 +458,117 @@ class Database:
             value = ",".join(parts[:12])
         with self.conn() as c:
             c.execute(f"UPDATE servers SET {field}=?, updated_at=? WHERE id=?", (value, now_iso(), server_id))
+
+    def update_server_tariff(
+        self, server_id: int, *, amount_minor: int, cycle: str, cycle_days: int | None = None,
+        expected_amount_minor: int, expected_cycle: str, expected_cycle_days: int | None,
+    ) -> bool:
+        """Atomically update future tariff without touching payment history or next_due.
+
+        Returns False when the server disappeared or tariff was changed meanwhile.
+        Balance-mode accounts are intentionally excluded: their accrued balance
+        must be settled before a daily rate change.
+        """
+        valid_cycles = {"daily", "weekly", "monthly", "days30", "days31", "quarterly", "semiannual", "yearly", "custom"}
+        if cycle not in valid_cycles:
+            raise ValueError("Неизвестный период оплаты")
+        if not isinstance(amount_minor, int) or not 0 <= amount_minor <= 10**15:
+            raise ValueError("Некорректная стоимость")
+        if cycle == "custom":
+            if not isinstance(cycle_days, int) or cycle_days < 1:
+                raise ValueError("Не задан период в днях")
+        else:
+            cycle_days = None
+        with self.conn() as c:
+            cur = c.execute(
+                "UPDATE servers SET amount_minor=?,cycle=?,cycle_days=?,updated_at=? "
+                "WHERE id=? AND active=1 AND deleted_at IS NULL AND billing_mode='scheduled' "
+                "AND amount_minor=? AND cycle=? AND cycle_days IS ?",
+                (amount_minor, cycle, cycle_days, now_iso(), server_id,
+                 expected_amount_minor, expected_cycle, expected_cycle_days),
+            )
+            return cur.rowcount == 1
+
+    def update_balance_daily_rate(self, server_id: int, expected_amount: int, new_amount: int) -> bool:
+        """Settle old daily spending once, then switch the rate without resetting money."""
+        if not isinstance(new_amount, int) or not 0 <= new_amount <= 10**15:
+            raise ValueError("Некорректная стоимость")
+        today = date.today()
+        stamp = now_iso()
+        with self.conn() as c:
+            row = c.execute("SELECT * FROM servers WHERE id=?", (server_id,)).fetchone()
+            if not row or not row["active"] or row["deleted_at"] or row["archived_at"] or row["cycle"] != "daily" or row["billing_mode"] != "balance" or int(row["amount_minor"]) != expected_amount:
+                return False
+            remaining = self.balance_remaining_minor(dict(row), today)
+            days_left = remaining // max(1, new_amount)
+            due = (today + timedelta(days=days_left)).isoformat()
+            c.execute(
+                "UPDATE servers SET amount_minor=?,balance_minor=?,balance_updated_at=?,next_due=?,updated_at=? WHERE id=?",
+                (new_amount, remaining, stamp, due, stamp, server_id),
+            )
+            c.execute(
+                "INSERT INTO daily_rate_history(server_id,effective_day,amount_minor) VALUES(?,?,?) "
+                "ON CONFLICT(server_id,effective_day) DO UPDATE SET amount_minor=excluded.amount_minor",
+                (server_id, today.isoformat(), new_amount),
+            )
+            return True
+
+    def record_daily_monthly_expenses(self, today: date) -> int:
+        """Post one entry per balance-mode daily VPS and calendar month on/after month end.
+
+        A separate ledger makes retries idempotent. Rate history is effective by day,
+        and legacy VPS have no invented expenses from before first tracked day.
+        """
+        if not isinstance(today, date):
+            raise ValueError("Некорректная дата")
+        import calendar
+        month_end = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
+        if today < month_end:
+            return 0
+        created = 0
+        with self.conn() as c:
+            servers = c.execute(
+                "SELECT * FROM servers WHERE billing_mode='balance' AND cycle='daily' "
+                "AND deleted_at IS NULL AND archived_at IS NULL AND active=1"
+            ).fetchall()
+            first_day = today.replace(day=1)
+            for s in servers:
+                sid = int(s["id"])
+                key = first_day.strftime("%Y-%m")
+                if c.execute("SELECT 1 FROM daily_monthly_ledger WHERE server_id=? AND month=?", (sid, key)).fetchone():
+                    continue
+                rates = c.execute(
+                    "SELECT effective_day,amount_minor FROM daily_rate_history WHERE server_id=? AND effective_day<=? "
+                    "ORDER BY effective_day", (sid, month_end.isoformat()),
+                ).fetchall()
+                if not rates:
+                    continue
+                start = max(first_day, date.fromisoformat(rates[0]["effective_day"]))
+                try:
+                    start = max(start, date.fromisoformat(str(s["created_at"])[:10]))
+                except (ValueError, TypeError):
+                    pass
+                if start > month_end:
+                    continue
+                day = start
+                index = 0
+                total = 0
+                while day <= month_end:
+                    while index + 1 < len(rates) and rates[index + 1]["effective_day"] <= day.isoformat():
+                        index += 1
+                    total += int(rates[index]["amount_minor"])
+                    day += timedelta(days=1)
+                # Record consumption separately from balance top-ups; top-ups are actual cash payments.
+                cur = c.execute(
+                    "INSERT INTO payments(server_id,amount_minor,currency,due_date,paid_at,next_due,note) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (sid, total, s["currency"], month_end.isoformat(),
+                     month_end.isoformat() + "T23:59:59", s["next_due"], "Расход за ежедневный VPS (начисление, не платёж)"),
+                )
+                c.execute("INSERT INTO daily_monthly_ledger(server_id,month,payment_id) VALUES(?,?,?)",
+                          (sid, key, cur.lastrowid))
+                created += 1
+        return created
 
     def trash_server(self, server_id: int) -> None:
         with self.conn() as c:
@@ -1066,6 +1204,31 @@ class Database:
             asof = on_date
         elapsed = max(0, (on_date - asof).days)
         return max(0, int(server.get("balance_minor") or 0) - elapsed * int(server.get("amount_minor") or 0))
+
+    def set_balance_remaining(self, server_id: int, new_balance_minor: int) -> bool:
+        """Reconcile to the provider's actual remaining balance without creating a payment.
+
+        Existing daily consumption stays in the rate-history ledger; only the
+        remaining amount and projected exhaustion date are reset today.
+        """
+        if (not isinstance(new_balance_minor, int) or isinstance(new_balance_minor, bool)
+                or not 0 <= new_balance_minor <= 10**15):
+            raise ValueError("Некорректная сумма баланса")
+        today = date.today()
+        stamp = now_iso()
+        with self.conn() as c:
+            row = c.execute("SELECT * FROM servers WHERE id=?", (server_id,)).fetchone()
+            if (not row or not row["active"] or row["deleted_at"] or row["archived_at"]
+                    or row["cycle"] != "daily" or row["billing_mode"] != "balance"):
+                return False
+            daily_price = int(row["amount_minor"])
+            days_left = new_balance_minor // max(1, daily_price)
+            next_due = (today + timedelta(days=days_left)).isoformat()
+            c.execute(
+                "UPDATE servers SET balance_minor=?,balance_updated_at=?,next_due=?,updated_at=? WHERE id=?",
+                (new_balance_minor, stamp, next_due, stamp, server_id),
+            )
+        return True
 
     def topup_balance(self, server_id: int, amount_minor: int) -> int:
         server = self.get_server(server_id)

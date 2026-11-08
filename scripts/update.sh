@@ -205,6 +205,19 @@ mkdir -p "$TARGET"
 cp -a "$SRC"/. "$TARGET"/
 chmod +x "$TARGET/scripts"/*.sh
 
+# Release-specific guard: refuse to deploy metadata-only builds that omit UI code.
+if [[ "$NEW" == "2.5.34" || "$NEW" == "2.5.35" || "$NEW" == "2.5.36" ]]; then
+  grep -Fq 'Проверить доступность сейчас' "$TARGET/app/ui.py" || { echo 'Ошибка: нет кнопки ручного мониторинга в релизе' >&2; exit 1; }
+  grep -Fq 'Стоимость за сутки' "$TARGET/app/ui.py" || { echo 'Ошибка: нет кнопки изменения дневной цены в релизе' >&2; exit 1; }
+  grep -Fq 'F.data == "monitor:checknow"' "$TARGET/app/handlers.py" || { echo 'Ошибка: отсутствует обработчик ручного мониторинга' >&2; exit 1; }
+  if [[ "$NEW" == "2.5.36" ]]; then
+    grep -Fq 'Изменить баланс' "$TARGET/app/ui.py" || { echo 'Ошибка: нет кнопки изменения баланса' >&2; exit 1; }
+    grep -Fq 'set_balance_remaining' "$TARGET/app/db.py" || { echo 'Ошибка: нет корректировки баланса' >&2; exit 1; }
+    grep -Fq 'balance:adjustsave:' "$TARGET/app/handlers.py" || { echo 'Ошибка: нет подтверждения корректировки' >&2; exit 1; }
+  fi
+  grep -Fq 'record_daily_monthly_expenses' "$TARGET/app/db.py" || { echo 'Ошибка: отсутствует месячный учёт' >&2; exit 1; }
+fi
+
 # compose.yaml is runtime symlink to current/compose.yaml; never copy over it.
 
 # Repair/update the host-side Telegram update bridge on every release.
@@ -214,6 +227,25 @@ fi
 
 echo "[1/7] Собираю новый image, старый бот продолжает работать"
 docker build -t "vps-bill:$NEW" "$TARGET" >/tmp/vps-bill-update-build.log 2>&1 || { cat /tmp/vps-bill-update-build.log; exit 1; }
+
+if [[ "$NEW" == "2.5.34" || "$NEW" == "2.5.35" || "$NEW" == "2.5.36" ]]; then
+  echo '[1/7] Проверяю новые функции внутри Docker-образа'
+  docker run --rm --entrypoint python "vps-bill:$NEW" -c '
+from pathlib import Path
+u=Path("/app/app/ui.py").read_text()
+h=Path("/app/app/handlers.py").read_text()
+d=Path("/app/app/db.py").read_text()
+assert "Проверить доступность сейчас" in u, "monitor UI missing"
+assert "Стоимость за сутки" in u, "daily price UI missing"
+assert "monitor:checknow" in h, "monitor handler missing"
+assert "record_daily_monthly_expenses" in d, "monthly ledger missing"
+if Path("/app/VERSION").read_text().strip() == "2.5.36":
+    assert "Изменить баланс" in u, "balance edit UI missing"
+    assert "balance:adjustsave:" in h, "balance adjust handler missing"
+    assert "set_balance_remaining" in d, "balance reconciliation missing"
+print("Новые функции в Docker-образе: OK")
+' || { echo 'Ошибка: Docker-образ не содержит требуемые функции' >&2; exit 1; }
+fi
 
 echo "[2/7] Создаю online backup"
 TS=$(date +%Y%m%d-%H%M%S)

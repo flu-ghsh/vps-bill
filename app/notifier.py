@@ -182,6 +182,13 @@ class Notifier:
                 # notification_log is marked only after successful delivery by flush_outbox.
                 pass
 
+    async def daily_monthly_expenses(self, now: datetime):
+        # Also recover the prior month if the bot was offline on its final day.
+        this_month = now.date().replace(day=1)
+        last_month_end = this_month - timedelta(days=1)
+        self.db.record_daily_monthly_expenses(last_month_end)
+        self.db.record_daily_monthly_expenses(now.date())
+
     async def monthly_report(self, now: datetime):
         if not self.db.monthly_report_enabled() or now.day != self.db.report_day():
             return
@@ -405,6 +412,7 @@ class Notifier:
                 ("snoozes", self.check_snoozes),
                 ("due", self.check_due),
                 ("balances", self.check_balances),
+                ("daily_expenses", self.daily_monthly_expenses),
                 ("monthly", self.monthly_report),
                 ("updates", self.check_updates),
                 ("monitoring", self.check_availability),

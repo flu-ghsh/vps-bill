@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -12,9 +14,10 @@ from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, InlineK
 
 from . import __version__
 from .backup_archive import create_backup_archive, delete_old_backup_files
-from .billing import annual_equivalent_minor, money, monthly_equivalent_minor, next_due, parse_amount_minor, sum_by_currency
+from .billing import annual_equivalent_minor, cycle_label, money, monthly_equivalent_minor, next_due, parse_amount_minor, sum_by_currency
 from .config import Settings
 from .db import Database
+from .monitoring import ping_probe, valid_ip
 from .updates import changelog_to_telegram_html, create_update_request, is_newer, latest_release
 from .ui import (
     EMOJI_SLOTS,
@@ -50,6 +53,7 @@ from .ui import (
     server_card,
     server_details_keyboard,
     server_edit_back_keyboard,
+    tariff_cycle_keyboard,
     trash_item_keyboard,
     trash_list_keyboard,
     archive_list_keyboard,
@@ -90,8 +94,23 @@ class EditServerField(StatesGroup):
     waiting = State()
 
 
+class EditTariff(StatesGroup):
+    amount = State()
+    confirm = State()
+
+
+class DailyPriceEdit(StatesGroup):
+    amount = State()
+    confirm = State()
+
+
 class BalanceTopup(StatesGroup):
     waiting = State()
+
+
+class BalanceAdjustment(StatesGroup):
+    amount = State()
+    confirm = State()
 
 
 class DictionaryRename(StatesGroup):
@@ -261,6 +280,7 @@ class BotHandlers:
         r.callback_query.register(self.monitoring_page, F.data == "settings:monitoring")
         r.callback_query.register(self.monitor_global_toggle, F.data == "monitor:global")
         r.callback_query.register(self.monitor_enable_all, F.data == "monitor:enableall")
+        r.callback_query.register(self.monitor_check_now, F.data == "monitor:checknow")
         r.callback_query.register(self.monitor_method_set, F.data.startswith("monitor:method:"))
         r.callback_query.register(self.monitor_tcp_port_start, F.data == "monitor:tcpport")
         r.callback_query.register(self.monitor_tcp_port_cancel, F.data == "monitor:tcpport:cancel")
@@ -310,8 +330,21 @@ class BotHandlers:
         r.callback_query.register(self.paid, F.data.startswith("paid:"))
         r.callback_query.register(self.balance_topup_start, F.data.startswith("balance:topup:"))
         r.message.register(self.balance_topup_input, BalanceTopup.waiting)
+        r.callback_query.register(self.balance_adjust_start, F.data.startswith("balance:adjust:"))
+        r.message.register(self.balance_adjust_input, BalanceAdjustment.amount)
+        r.callback_query.register(self.balance_adjust_save, BalanceAdjustment.confirm, F.data.startswith("balance:adjustsave:"))
+        r.callback_query.register(self.balance_adjust_cancel, F.data.startswith("balance:adjustcancel:"))
         r.callback_query.register(self.snooze, F.data.startswith("snooze:"))
         r.callback_query.register(self.server_details, F.data.startswith("details:"))
+        r.callback_query.register(self.daily_price_open, F.data.startswith("dailyprice:open:"))
+        r.message.register(self.daily_price_input, DailyPriceEdit.amount)
+        r.callback_query.register(self.daily_price_confirm, DailyPriceEdit.confirm, F.data.startswith("dailyprice:save:"))
+        r.callback_query.register(self.daily_price_cancel, F.data.startswith("dailyprice:cancel:"))
+        r.callback_query.register(self.tariff_open, F.data.startswith("tariff:open:"))
+        r.callback_query.register(self.tariff_select_cycle, F.data.startswith("tariff:cycle:"))
+        r.callback_query.register(self.tariff_cancel, F.data.startswith("tariff:cancel:"))
+        r.callback_query.register(self.tariff_confirm, EditTariff.confirm, F.data.startswith("tariff:save:"))
+        r.message.register(self.tariff_amount_input, EditTariff.amount)
         r.callback_query.register(self.country_choose, F.data.startswith("country:choose:"))
         r.callback_query.register(self.country_set, F.data.startswith("country:set:"))
         r.callback_query.register(self.tag_choose, F.data.startswith("tag:choose:"))
@@ -507,6 +540,28 @@ class BotHandlers:
         next_month = (month + timedelta(days=32)).replace(day=1)
         previous_month = (month - timedelta(days=1)).replace(day=1)
         payments = list(reversed(self.db.payments_between(month.isoformat(), next_month.isoformat())))
+        if not manage:
+            # Daily manual payments remain individual DB records for deletion/audit,
+            # but the history displays one consolidated entry dated month-end.
+            daily_ids = {
+                int(s["id"]) for s in self.db.list_servers(active_only=False)
+                if s.get("cycle") == "daily" and s.get("billing_mode") != "balance"
+            }
+            grouped = {}
+            visible = []
+            for payment in payments:
+                if int(payment["server_id"]) not in daily_ids:
+                    visible.append(payment)
+                    continue
+                key = (int(payment["server_id"]), payment["currency"])
+                if key not in grouped:
+                    group = dict(payment)
+                    group["name"] = str(payment["name"]) + " (ежедневно, за месяц)"
+                    group["amount_minor"] = 0
+                    group["paid_at"] = (next_month - timedelta(days=1)).isoformat() + "T23:59:59"
+                    grouped[key] = group
+                grouped[key]["amount_minor"] += int(payment["amount_minor"])
+            payments = sorted(visible + list(grouped.values()), key=lambda pay: pay["paid_at"], reverse=True)
         month_names = (
             "январь", "февраль", "март", "апрель", "май", "июнь",
             "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
@@ -1464,6 +1519,45 @@ class BotHandlers:
             reply_markup=monitoring_settings_keyboard(enabled, interval, failures, recovery, all_state, method, tcp_port, self.emojis),
         )
 
+    async def monitor_check_now(self, q: CallbackQuery):
+        """On-demand ICMP check; does not modify scheduled monitor state or alerts."""
+        await q.answer("Проверяю серверы...")
+        servers = self.db.list_servers()
+        if not servers:
+            return await q.message.answer(f"{e(self.emojis, 'monitor')} <b>Проверка доступности</b>\n\nАктивных серверов нет.")
+        timeout = self.db.monitor_timeout()
+        semaphore = asyncio.Semaphore(10)
+
+        async def check(server):
+            ip = str(server.get("ip") or "").strip()
+            if not valid_ip(ip):
+                return "⚪ IP не указан" if not ip else "⚪ Некорректный IP"
+            async with semaphore:
+                try:
+                    ok = await ping_probe(ip, timeout, attempts=1)
+                    return "🟢 Доступен" if ok else "🔴 Не отвечает на Ping"
+                except Exception:
+                    return "🔴 Ошибка Ping"
+
+        statuses = await asyncio.gather(*(check(s) for s in servers))
+        lines = [f"{e(self.emojis, 'monitor')} <b>Проверка доступности сейчас (Ping)</b>", ""]
+        available = sum(x.startswith("🟢") for x in statuses)
+        unreachable = sum(x.startswith("🔴") for x in statuses)
+        lines.append(f"Доступны: <b>{available}</b> · Не ответили: <b>{unreachable}</b> · Без IP: <b>{len(servers)-available-unreachable}</b>")
+        lines.append("Не отвечает на Ping не всегда означает, что VPS выключен: ICMP может быть заблокирован.")
+        lines.append("")
+        for server, status in zip(servers, statuses):
+            lines.append(f"• <b>{h(server['name'])}</b> ({h(server.get('ip') or '-')}) — {status}")
+        # A Telegram message cannot exceed 4096 characters.
+        message = ""
+        for line in lines:
+            if len(message) + len(line) + 1 > 3800:
+                await q.message.answer(message)
+                message = f"{e(self.emojis, 'monitor')} <b>Проверка доступности — продолжение</b>\n"
+            message += line + "\n"
+        if message.strip():
+            await q.message.answer(message)
+
     async def monitor_global_toggle(self, q: CallbackQuery):
         enabling = not self.db.monitoring_enabled()
         self.db.set_setting("monitoring_enabled", "1" if enabling else "0")
@@ -1571,7 +1665,7 @@ class BotHandlers:
                 value = " · ".join(x.strip() for x in value.split(",") if x.strip())
             lines.append(f"{e(self.emojis, slot)} {label}: <b>{h(value)}</b>")
         lines.append(f"{e(self.emojis, 'monitor')} Мониторинг: <b>{'ВКЛ' if enabled else 'ВЫКЛ'}</b>")
-        await q.message.edit_text("\n".join(lines), reply_markup=server_details_keyboard(sid, self.emojis, has_ip=True, has_country=bool(str(server.get("country") or "").strip()), has_tags=bool(str(server.get("tags") or "").strip()), has_notes=bool(str(server.get("notes") or "").strip()), monitor_enabled=enabled))
+        await q.message.edit_text("\n".join(lines), reply_markup=server_details_keyboard(sid, self.emojis, has_ip=True, has_country=bool(str(server.get("country") or "").strip()), has_tags=bool(str(server.get("tags") or "").strip()), has_notes=bool(str(server.get("notes") or "").strip()), monitor_enabled=enabled, balance_mode=str(server.get("billing_mode") or "") == "balance"))
 
     def _cleanup_old_backups(self) -> tuple[int, int]:
         """Apply the configured age/count retention policy to local backups."""
@@ -1778,6 +1872,85 @@ class BotHandlers:
                 reply_markup=backups_keyboard(emojis),
             )
 
+    async def balance_adjust_start(self, q: CallbackQuery, state: FSMContext):
+        sid = int(q.data.rsplit(":", 1)[1])
+        server = self.db.get_server(sid)
+        if (not server or not server.get("active") or server.get("deleted_at")
+                or server.get("archived_at") or server.get("billing_mode") != "balance"
+                or server.get("cycle") != "daily"):
+            return await q.answer("Корректировка баланса недоступна", show_alert=True)
+        current = self.db.balance_remaining_minor(server)
+        await state.clear()
+        await state.set_state(BalanceAdjustment.amount)
+        await state.update_data(sid=sid)
+        await q.answer()
+        await q.message.edit_text(
+            f"{e(self.emojis, 'money')} <b>Изменить баланс</b>\n\n"
+            f"Сервер: <b>{h(server['name'])}</b>\n"
+            f"Расчётный остаток: <b>{money(current, server['currency'])}</b>\n\n"
+            "Введи фактический остаток у хостера, например <code>5.40</code>. "
+            "Это замена остатка, не сумма пополнения. Корректировка не создаёт платёж.",
+            reply_markup=kb([[button(self.emojis, "cancel", "Отмена", f"balance:adjustcancel:{sid}")]]),
+        )
+
+    async def balance_adjust_input(self, m: Message, state: FSMContext):
+        import re
+        data = await state.get_data()
+        sid = int(data.get("sid") or 0)
+        server = self.db.get_server(sid)
+        if (not server or not server.get("active") or server.get("deleted_at")
+                or server.get("archived_at") or server.get("billing_mode") != "balance"
+                or server.get("cycle") != "daily"):
+            await state.clear()
+            return await m.answer("Сессия устарела", reply_markup=main_menu(self.emojis))
+        raw = str(m.text or "").strip().replace(" ", "")
+        if not re.fullmatch(r"\d{1,12}(?:[.,]\d{1,2})?", raw):
+            return await m.answer("Введите сумму от 0, например <code>5.40</code>.")
+        amount = parse_amount_minor(raw)
+        if amount > 10**15:
+            return await m.answer("Сумма слишком большая.")
+        old = self.db.balance_remaining_minor(server)
+        await state.update_data(new_balance=amount, old_balance=old)
+        await state.set_state(BalanceAdjustment.confirm)
+        await m.answer(
+            f"{e(self.emojis, 'money')} <b>Подтверждение изменения баланса</b>\n\n"
+            f"Сервер: <b>{h(server['name'])}</b>\n"
+            f"Было: <b>{money(old, server['currency'])}</b>\n"
+            f"Станет: <b>{money(amount, server['currency'])}</b>\n\n"
+            "Дата исчерпания будет пересчитана. В историю платежей эта операция не попадёт.",
+            reply_markup=kb([
+                [button(self.emojis, "success", "Сохранить баланс", f"balance:adjustsave:{sid}", style="success")],
+                [button(self.emojis, "cancel", "Отмена", f"balance:adjustcancel:{sid}")],
+            ]),
+        )
+
+    async def balance_adjust_save(self, q: CallbackQuery, state: FSMContext):
+        sid = int(q.data.rsplit(":", 1)[1])
+        data = await state.get_data()
+        if int(data.get("sid") or 0) != sid or data.get("new_balance") is None:
+            return await q.answer("Сессия устарела", show_alert=True)
+        changed = self.db.set_balance_remaining(sid, int(data["new_balance"]))
+        await state.clear()
+        if not changed:
+            return await q.answer("Сервер недоступен для корректировки", show_alert=True)
+        await q.answer("Баланс изменён")
+        server = self.db.get_server(sid)
+        await q.message.edit_text(
+            f"{e(self.emojis, 'success')} <b>Баланс обновлён</b>\n\n"
+            + server_card(server, self.emojis),
+            reply_markup=server_buttons(sid, self.emojis, balance_mode=True),
+        )
+
+    async def balance_adjust_cancel(self, q: CallbackQuery, state: FSMContext):
+        sid = int(q.data.rsplit(":", 1)[1])
+        await state.clear()
+        await q.answer("Отменено")
+        server = self.db.get_server(sid)
+        if not server:
+            return await q.message.edit_text("Сервер не найден", reply_markup=back_main(self.emojis))
+        await q.message.edit_text(server_card(server, self.emojis),
+                                  reply_markup=server_buttons(sid, self.emojis, balance_mode=True))
+
     async def balance_topup_start(self, q: CallbackQuery, state: FSMContext):
         sid = int(q.data.rsplit(":", 1)[1])
         server = self.db.get_server(sid)
@@ -1853,6 +2026,8 @@ class BotHandlers:
         if not server or server.get("deleted_at"):
             return await q.message.edit_text("Сервер не найден.", reply_markup=back_main(self.emojis))
         lines = [f"{e(self.emojis, 'edit')} <b>Данные VPS</b>", "", f"<b>{h(server['name'])}</b>"]
+        lines.append(f"{e(self.emojis, 'money')} Стоимость: <b>{h(money(server['amount_minor'], server['currency']))}</b>")
+        lines.append(f"{e(self.emojis, 'cycle')} Период: <b>{h(cycle_label(server['cycle'], server.get('cycle_days')))}</b>")
         fields = (
             ("ip", "ip", "IP"),
             ("country", "country", "Страна"),
@@ -1864,7 +2039,189 @@ class BotHandlers:
             if key == "tags" and value != "-":
                 value = " · ".join(x.strip() for x in value.split(",") if x.strip())
             lines.append(f"{e(self.emojis, slot)} {label}: <b>{h(value)}</b>")
-        await q.message.edit_text("\n".join(lines), reply_markup=server_details_keyboard(sid, self.emojis, has_ip=bool(str(server.get("ip") or "").strip()), has_country=bool(str(server.get("country") or "").strip()), has_tags=bool(str(server.get("tags") or "").strip()), has_notes=bool(str(server.get("notes") or "").strip()), monitor_enabled=bool(server.get("monitor_enabled"))))
+        await q.message.edit_text("\n".join(lines), reply_markup=server_details_keyboard(sid, self.emojis, has_ip=bool(str(server.get("ip") or "").strip()), has_country=bool(str(server.get("country") or "").strip()), has_tags=bool(str(server.get("tags") or "").strip()), has_notes=bool(str(server.get("notes") or "").strip()), monitor_enabled=bool(server.get("monitor_enabled")), balance_mode=str(server.get("billing_mode") or "") == "balance"))
+
+    async def daily_price_open(self, q: CallbackQuery, state: FSMContext):
+        sid = int(q.data.rsplit(":", 1)[1])
+        server = self.db.get_server(sid)
+        if not server or not server.get("active") or server.get("deleted_at") or server.get("archived_at") or server.get("billing_mode") != "balance" or server.get("cycle") != "daily":
+            return await q.answer("Изменение дневной цены недоступно", show_alert=True)
+        await state.clear()
+        await state.set_state(DailyPriceEdit.amount)
+        await state.update_data(sid=sid, old_amount=server["amount_minor"])
+        await q.answer()
+        await q.message.edit_text(
+            f"{e(self.emojis, 'money')} <b>Стоимость за сутки</b>\n\nСервер: <b>{h(server['name'])}</b>\n"
+            f"Текущая цена: <b>{money(server['amount_minor'], server['currency'])}</b>\n\n"
+            "Введи новую цену за день, например <code>1.50</code>. Новая цена начнёт действовать сегодня.",
+            reply_markup=kb([[button(self.emojis, "cancel", "Отмена", f"dailyprice:cancel:{sid}")]]),
+        )
+
+    async def daily_price_input(self, m: Message, state: FSMContext):
+        import re
+        data = await state.get_data()
+        sid = int(data.get("sid") or 0)
+        server = self.db.get_server(sid)
+        if not server or server.get("billing_mode") != "balance" or not server.get("active"):
+            await state.clear()
+            return await m.answer("Сессия устарела", reply_markup=main_menu(self.emojis))
+        raw = str(m.text or "").strip().replace(" ", "")
+        if not re.fullmatch(r"\d{1,12}(?:[.,]\d{1,2})?", raw):
+            return await m.answer("Введите корректную цену, например <code>1.50</code>.")
+        amount = parse_amount_minor(raw)
+        await state.update_data(new_amount=amount)
+        await state.set_state(DailyPriceEdit.confirm)
+        await m.answer(
+            f"{e(self.emojis, 'money')} <b>Подтверждение</b>\n\n{h(server['name'])}\n"
+            f"Было: <b>{money(data['old_amount'], server['currency'])}/день</b>\n"
+            f"Станет: <b>{money(amount, server['currency'])}/день</b>\n\n"
+            "Текущий остаток баланса сохранится, а дальнейшее списание будет по новой цене.",
+            reply_markup=kb([
+                [button(self.emojis, "paid", "Сохранить цену", f"dailyprice:save:{sid}", style="success")],
+                [button(self.emojis, "cancel", "Отмена", f"dailyprice:cancel:{sid}")],
+            ]),
+        )
+
+    async def daily_price_confirm(self, q: CallbackQuery, state: FSMContext):
+        sid = int(q.data.rsplit(":", 1)[1])
+        data = await state.get_data()
+        if int(data.get("sid") or 0) != sid or data.get("new_amount") is None:
+            return await q.answer("Сессия устарела", show_alert=True)
+        changed = self.db.update_balance_daily_rate(sid, int(data["old_amount"]), int(data["new_amount"]))
+        await state.clear()
+        if not changed:
+            return await q.answer("Цена уже изменилась или сервер недоступен", show_alert=True)
+        await q.answer("Цена изменена")
+        server = self.db.get_server(sid)
+        await q.message.edit_text(
+            f"{e(self.emojis, 'success')} <b>Стоимость за сутки обновлена</b>\n\n" + server_card(server, self.emojis),
+            reply_markup=server_buttons(sid, self.emojis, balance_mode=True),
+        )
+
+    async def daily_price_cancel(self, q: CallbackQuery, state: FSMContext):
+        sid = int(q.data.rsplit(":", 1)[1])
+        await state.clear()
+        await q.answer("Отменено")
+        server = self.db.get_server(sid)
+        if not server:
+            return await q.message.edit_text("Сервер не найден", reply_markup=back_main(self.emojis))
+        await q.message.edit_text(server_card(server, self.emojis),
+                                  reply_markup=server_buttons(sid, self.emojis, balance_mode=True))
+
+    async def tariff_open(self, q: CallbackQuery, state: FSMContext):
+        sid = int(q.data.rsplit(":", 1)[1])
+        server = self.db.get_server(sid)
+        if (not server or server.get("deleted_at") or not server.get("active")
+                or str(server.get("billing_mode") or "scheduled") != "scheduled"):
+            return await q.answer("Изменение тарифа для этого сервера недоступно", show_alert=True)
+        await state.clear()
+        await q.answer()
+        await q.message.edit_text(
+            f"{e(self.emojis, 'money')} <b>Стоимость и период</b>\n\n"
+            f"Сервер: <b>{h(server['name'])}</b>\n"
+            f"Стоимость: <b>{h(money(server['amount_minor'], server['currency']))}</b>\n"
+            f"Период: <b>{h(cycle_label(server['cycle'], server.get('cycle_days')))}</b>\n"
+            f"Следующая оплата: <b>{h(server['next_due'])}</b>\n\n"
+            "Выбери новый период. Чтобы поменять только стоимость, выбери текущий.",
+            reply_markup=tariff_cycle_keyboard(
+                sid, self.emojis, self.db.get_billing_cycles(),
+                current_cycle=server['cycle'], current_days=server.get('cycle_days'),
+            ),
+        )
+
+    async def tariff_select_cycle(self, q: CallbackQuery, state: FSMContext):
+        _, _, sid_raw, cycle = q.data.split(":", 3)
+        sid = int(sid_raw)
+        server = self.db.get_server(sid)
+        if (not server or server.get("deleted_at") or not server.get("active")
+                or str(server.get("billing_mode") or "scheduled") != "scheduled"):
+            return await q.answer("Изменение тарифа недоступно", show_alert=True)
+        if cycle not in set(self.db.get_billing_cycles()) | {str(server['cycle'])}:
+            return await q.answer("Период недоступен в настройках", show_alert=True)
+        cycle_days = server.get('cycle_days') if cycle == 'custom' else None
+        await state.set_state(EditTariff.amount)
+        await state.update_data(
+            tariff_server_id=sid, tariff_cycle=cycle, tariff_cycle_days=cycle_days,
+            tariff_expected_amount=server['amount_minor'],
+            tariff_expected_cycle=server['cycle'],
+            tariff_expected_days=server.get('cycle_days'),
+        )
+        await q.answer()
+        await q.message.edit_text(
+            f"{e(self.emojis, 'money')} <b>Новая стоимость</b>\n\n"
+            f"{h(server['name'])}\n"
+            f"Новый период: <b>{h(cycle_label(cycle, cycle_days))}</b>\n"
+            f"Текущая стоимость: <b>{h(money(server['amount_minor'], server['currency']))}</b>\n\n"
+            f"Введи стоимость за выбранный период в <b>{h(server['currency'])}</b>.\n"
+            "Например: <code>10.50</code>",
+            reply_markup=kb([[button(self.emojis, 'cancel', 'Отмена', f'tariff:cancel:{sid}')]]),
+        )
+
+    async def tariff_amount_input(self, m: Message, state: FSMContext):
+        import re
+        data = await state.get_data()
+        sid = int(data.get('tariff_server_id') or 0)
+        server = self.db.get_server(sid) if sid else None
+        if not server or server.get('deleted_at') or not server.get('active') or server.get('billing_mode') != 'scheduled':
+            await state.clear()
+            return await m.answer('Сессия редактирования устарела.', reply_markup=main_menu(self.emojis))
+        raw = (m.text or '').strip().replace(' ', '')
+        if not re.fullmatch(r'\d{1,12}(?:[.,]\d{1,2})?', raw):
+            return await m.answer('Введите корректную сумму, например <code>10.50</code>.',
+                                  reply_markup=kb([[button(self.emojis, 'cancel', 'Отмена', f'tariff:cancel:{sid}')]]))
+        amount = parse_amount_minor(raw)
+        cycle = str(data['tariff_cycle'])
+        cycle_days = data.get('tariff_cycle_days')
+        await state.update_data(tariff_new_amount=amount)
+        await state.set_state(EditTariff.confirm)
+        await m.answer(
+            f"{e(self.emojis, 'money')} <b>Подтвердить изменение тарифа?</b>\n\n"
+            f"Сервер: <b>{h(server['name'])}</b>\n\n"
+            f"Было: <b>{h(money(data['tariff_expected_amount'], server['currency']))}</b> "
+            f"/ {h(cycle_label(data['tariff_expected_cycle'], data.get('tariff_expected_days')))}\n"
+            f"Станет: <b>{h(money(amount, server['currency']))}</b> "
+            f"/ {h(cycle_label(cycle, cycle_days))}\n\n"
+            "Следующая дата оплаты и прошедшие платежи не изменятся.",
+            reply_markup=kb([
+                [button(self.emojis, 'paid', 'Сохранить тариф', f'tariff:save:{sid}', style='success')],
+                [button(self.emojis, 'cancel', 'Отмена', f'tariff:cancel:{sid}')],
+            ]),
+        )
+
+    async def tariff_confirm(self, q: CallbackQuery, state: FSMContext):
+        sid = int(q.data.rsplit(':', 1)[1])
+        data = await state.get_data()
+        if (int(data.get('tariff_server_id') or 0) != sid
+                or data.get('tariff_new_amount') is None):
+            return await q.answer('Сессия редактирования устарела', show_alert=True)
+        changed = self.db.update_server_tariff(
+            sid, amount_minor=int(data['tariff_new_amount']),
+            cycle=str(data['tariff_cycle']), cycle_days=data.get('tariff_cycle_days'),
+            expected_amount_minor=int(data['tariff_expected_amount']),
+            expected_cycle=str(data['tariff_expected_cycle']),
+            expected_cycle_days=data.get('tariff_expected_days'),
+        )
+        await state.clear()
+        if not changed:
+            return await q.answer('Тариф уже изменился. Открой карточку и попробуй ещё раз.', show_alert=True)
+        server = self.db.get_server(sid)
+        await q.answer('Тариф обновлён')
+        await q.message.edit_text(
+            f"{e(self.emojis, 'paid')} <b>Тариф сохранён</b>\n\n"
+            + server_card(server, self.emojis),
+            reply_markup=server_buttons(sid, self.emojis),
+        )
+
+    async def tariff_cancel(self, q: CallbackQuery, state: FSMContext):
+        sid = int(q.data.rsplit(':', 1)[1])
+        await state.clear()
+        await q.answer('Отменено')
+        server = self.db.get_server(sid)
+        if not server or server.get('deleted_at'):
+            return await q.message.edit_text('Сервер не найден.', reply_markup=back_main(self.emojis))
+        await q.message.edit_text(server_card(server, self.emojis),
+                                  reply_markup=server_buttons(sid, self.emojis,
+                                      balance_mode=str(server.get('billing_mode') or '') == 'balance'))
 
     async def country_choose(self, q: CallbackQuery):
         sid = int(q.data.rsplit(":", 1)[1])

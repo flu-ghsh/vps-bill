@@ -90,6 +90,10 @@ def cycle_label(cycle: str, cycle_days: int | None = None) -> str:
 def sum_by_currency(rows: Iterable[dict], amount_key: str = "amount_minor") -> dict[str, int]:
     out: dict[str, int] = defaultdict(int)
     for row in rows:
+        # The monthly daily-use row is informational. Balance top-ups already
+        # count as real payments, so do not count consumption a second time.
+        if str(row.get("note") or "").startswith("Расход за ежедневный VPS (начисление"):
+            continue
         out[row["currency"].upper()] += int(row[amount_key])
     return dict(out)
 
