@@ -328,6 +328,7 @@ class BotHandlers:
         r.message.register(self.provider_url_input, ProviderUrlInput.waiting)
 
         r.callback_query.register(self.paid, F.data.startswith("paid:"))
+        r.callback_query.register(self.host_balance_action, F.data.startswith("hostbalance:"))
         r.callback_query.register(self.balance_topup_start, F.data.startswith("balance:topup:"))
         r.message.register(self.balance_topup_input, BalanceTopup.waiting)
         r.callback_query.register(self.balance_adjust_start, F.data.startswith("balance:adjust:"))
@@ -420,10 +421,11 @@ class BotHandlers:
         for server in items[start:start + page_size]:
             d = (date.fromisoformat(server["next_due"]) - self.today).days
             if str(server.get("billing_mode") or "scheduled") == "balance":
-                remaining = self.db.balance_remaining_minor(server, self.today)
-                days_left = remaining // max(1, int(server.get("amount_minor") or 1))
-                label = f"{server['name']} · баланс на ~{days_left} дн."
-                style = "primary" if days_left <= int(server.get("balance_alert_days") or 3) else "success"
+                account = self.db.provider_balance(server['provider'],server['currency'],self.today)
+                days_left = (account or {}).get('days_left')
+                days_left = days_left if days_left is not None else 999999
+                label = f"{server['name']} · ~{days_left} дн."
+                style = "primary" if days_left <= 7 else "success"
             elif d < 0:
                 label = f"{server['name']} · просрочено {abs(d)} дн."
                 style = "danger"
@@ -923,12 +925,40 @@ class BotHandlers:
                 provider_link = f'<a href="{h(provider_url)}">открыть</a>'
             else:
                 provider_link = '<b>не задана</b>'
-            extra = f"\nСсылка на ЛК: {provider_link}"
+            accounts = self.db.provider_balances_for(value)
+            balance_lines = []
+            for acc in accounts:
+                daily = acc['daily_minor']
+                days = str(acc['days_left']) if acc['days_left'] is not None else '—'
+                balance_lines.append(
+                    f"\n\n{e(self.emojis, 'payments')} <b>Общий баланс {h(acc['currency'])}</b>"
+                    f"\nОстаток: <b>{money(acc['remaining_minor'],acc['currency'])}</b>"
+                    f"\nВсе VPS в сутки: <b>{money(daily,acc['currency'])}</b>"
+                    f"\nХватит примерно на: <b>{days} дн.</b>"
+                )
+            extra = f"\nСсылка на ЛК: {provider_link}" + ''.join(balance_lines)
         await q.message.edit_text(
             f"<b>{h(self._dictionary_title(kind))}</b>\n\nТекущее значение: <b>{h(value)}</b>{extra}",
-            reply_markup=dictionary_edit_keyboard(kind, idx, self.emojis, provider_url),
+            reply_markup=dictionary_edit_keyboard(kind, idx, self.emojis, provider_url, accounts if kind == "provider" else None),
             disable_web_page_preview=True,
         )
+
+    async def host_balance_action(self, q: CallbackQuery, state: FSMContext):
+        try:
+            _, action, index, currency = q.data.split(":",3)
+            provider = self.db.list_providers()[int(index)]
+            candidates = [s for s in self.db.list_servers() if s['provider'].casefold()==provider.casefold()
+                          and s['currency']==currency and s['billing_mode']=='balance' and s['cycle']=='daily']
+            if not candidates:
+                return await q.answer("Нет активных VPS с этим балансом",show_alert=True)
+            sid = candidates[0]['id']
+        except (ValueError, IndexError):
+            return await q.answer("Список хостеров изменился",show_alert=True)
+        if action == 'topup':
+            return await self.balance_topup_start(q,state,server_id=sid)
+        if action == 'adjust':
+            return await self.balance_adjust_start(q,state,server_id=sid)
+        return await q.answer("Неизвестное действие",show_alert=True)
 
     async def dictionary_delete_ask(self, q: CallbackQuery):
         await q.answer()
@@ -1872,8 +1902,8 @@ class BotHandlers:
                 reply_markup=backups_keyboard(emojis),
             )
 
-    async def balance_adjust_start(self, q: CallbackQuery, state: FSMContext):
-        sid = int(q.data.rsplit(":", 1)[1])
+    async def balance_adjust_start(self, q: CallbackQuery, state: FSMContext, server_id: int | None = None):
+        sid = server_id if server_id is not None else int(q.data.rsplit(":", 1)[1])
         server = self.db.get_server(sid)
         if (not server or not server.get("active") or server.get("deleted_at")
                 or server.get("archived_at") or server.get("billing_mode") != "balance"
@@ -1886,7 +1916,7 @@ class BotHandlers:
         await q.answer()
         await q.message.edit_text(
             f"{e(self.emojis, 'money')} <b>Изменить баланс</b>\n\n"
-            f"Сервер: <b>{h(server['name'])}</b>\n"
+            f"Хостер: <b>{h(server['provider'])}</b> · {h(server['currency'])}\n"
             f"Расчётный остаток: <b>{money(current, server['currency'])}</b>\n\n"
             "Введи фактический остаток у хостера, например <code>5.40</code>. "
             "Это замена остатка, не сумма пополнения. Корректировка не создаёт платёж.",
@@ -1914,10 +1944,10 @@ class BotHandlers:
         await state.set_state(BalanceAdjustment.confirm)
         await m.answer(
             f"{e(self.emojis, 'money')} <b>Подтверждение изменения баланса</b>\n\n"
-            f"Сервер: <b>{h(server['name'])}</b>\n"
+            f"Хостер: <b>{h(server['provider'])}</b> · {h(server['currency'])}\n"
             f"Было: <b>{money(old, server['currency'])}</b>\n"
             f"Станет: <b>{money(amount, server['currency'])}</b>\n\n"
-            "Дата исчерпания будет пересчитана. В историю платежей эта операция не попадёт.",
+            "Дата исчерпания общего баланса будет пересчитана для всех VPS. В историю платежей эта операция не попадёт.",
             reply_markup=kb([
                 [button(self.emojis, "success", "Сохранить баланс", f"balance:adjustsave:{sid}", style="success")],
                 [button(self.emojis, "cancel", "Отмена", f"balance:adjustcancel:{sid}")],
@@ -1951,8 +1981,8 @@ class BotHandlers:
         await q.message.edit_text(server_card(server, self.emojis),
                                   reply_markup=server_buttons(sid, self.emojis, balance_mode=True))
 
-    async def balance_topup_start(self, q: CallbackQuery, state: FSMContext):
-        sid = int(q.data.rsplit(":", 1)[1])
+    async def balance_topup_start(self, q: CallbackQuery, state: FSMContext, server_id: int | None = None):
+        sid = server_id if server_id is not None else int(q.data.rsplit(":", 1)[1])
         server = self.db.get_server(sid)
         if not server or str(server.get("billing_mode") or "") != "balance":
             return await q.answer("Балансовый режим не включён", show_alert=True)
@@ -1960,7 +1990,7 @@ class BotHandlers:
         await state.update_data(balance_topup_server_id=sid)
         await q.answer()
         await q.message.edit_text(
-            f"{e(self.emojis, 'payments')} <b>Пополнение баланса</b>\n\nВведите сумму пополнения. Она сразу попадёт в расходы текущего месяца.",
+            f"{e(self.emojis, 'payments')} <b>Общий баланс: {h(server['provider'])} · {h(server['currency'])}</b>\n\nВведите сумму пополнения. Она попадёт в расходы текущего месяца один раз.",
             reply_markup=cancel_keyboard(self.emojis),
         )
 
@@ -2646,6 +2676,21 @@ class BotHandlers:
         await state.update_data(amount_minor=amount)
         data = await state.get_data()
         if data.get("billing_mode") == "balance":
+            existing = self.db.provider_balance(str(data['provider']),str(data['currency']))
+            if existing is not None:
+                sid = self.db.add_server(
+                    name=data['name'],provider=data['provider'],amount_minor=amount,
+                    currency=data['currency'],next_due=self.today.isoformat(),cycle='daily',
+                    billing_mode='balance',balance_minor=0,
+                )
+                await state.clear()
+                server = self.db.get_server(sid)
+                await m.answer(
+                    f"{e(self.emojis, 'paid')} <b>VPS добавлен к общему балансу хостера</b>\n\n"
+                    + server_card(server,self.emojis),
+                    reply_markup=server_buttons(sid,self.emojis,balance_mode=True),
+                )
+                return
             await state.set_state(AddServer.balance)
             await m.answer(
                 f"{e(self.emojis, 'payments')} <b>Текущий баланс у хостера</b>\n\nВведите остаток на балансе в выбранной валюте:",

@@ -153,34 +153,38 @@ class Notifier:
     async def check_balances(self, now: datetime):
         emojis = self.db.get_emojis()
         today = now.date()
+        seen: set[tuple[str,str]] = set()
         for s in self.db.list_servers():
-            if str(s.get("billing_mode") or "scheduled") != "balance":
+            if str(s.get('billing_mode') or 'scheduled') != 'balance':
                 continue
-            daily = int(s.get("amount_minor") or 0)
+            key = (str(s['provider']).casefold(),s['currency'])
+            if key in seen:
+                continue
+            seen.add(key)
+            account = self.db.provider_balance(s['provider'],s['currency'],today)
+            if not account:
+                continue
+            daily = int(account['daily_minor'])
             if daily <= 0:
                 continue
-            remaining = self.db.balance_remaining_minor(s, today)
-            days_left = remaining // daily
-            threshold = int(s.get("balance_alert_days") or 3)
+            remaining = int(account['remaining_minor'])
+            days_left = remaining//daily
+            threshold = int(account['balance_alert_days'])
             if days_left > threshold:
                 continue
-            snapshot = str(s.get("balance_updated_at") or today.isoformat())
+            snapshot = str(account['balance_updated_at'])
             kind = f"balance_low:{snapshot}"
-            if self.db.notification_sent(s["id"], snapshot, kind):
+            if self.db.notification_sent(s['id'],snapshot,kind):
                 continue
             text = (
-                f"{e(emojis, 'warning')} <b>Заканчивается баланс</b>\n\n"
-                f"{e(emojis, 'server')} <b>{h(s['name'])}</b>\n"
-                f"Хостер: {h(s.get('provider') or '-')}\n\n"
-                f"Остаток: <b>{money(remaining, s['currency'])}</b>\n"
-                f"Расход: <b>{money(daily, s['currency'])}/день</b>\n"
+                f"{e(emojis, 'warning')} <b>Заканчивается общий баланс хостера</b>\n\n"
+                f"Хостер: <b>{h(s['provider'] or '-')}</b>\n\n"
+                f"Остаток: <b>{money(remaining,s['currency'])}</b>\n"
+                f"Расход всех VPS: <b>{money(daily,s['currency'])}/день</b>\n"
                 f"Хватит примерно на: <b>{days_left} дн.</b>"
             )
-            event_key = f"balance:{s['id']}:{snapshot}"
-            inserted = self.db.enqueue_outbox(event_key, "balance", text, server_id=s["id"], due_date=snapshot)
-            if inserted:
-                # notification_log is marked only after successful delivery by flush_outbox.
-                pass
+            event_key = f"balance:{key[0]}:{key[1]}:{snapshot}"
+            self.db.enqueue_outbox(event_key,'balance',text,server_id=s['id'],due_date=snapshot)
 
     async def daily_monthly_expenses(self, now: datetime):
         # Also recover the prior month if the bot was offline on its final day.

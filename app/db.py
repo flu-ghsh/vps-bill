@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .default_emojis import DEFAULT_CUSTOM_EMOJIS
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SCHEMA = r'''
 PRAGMA foreign_keys=ON;
@@ -125,6 +125,14 @@ CREATE TABLE IF NOT EXISTS currency_settings (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS provider_balances (
+  provider TEXT NOT NULL COLLATE NOCASE,
+  currency TEXT NOT NULL,
+  balance_minor INTEGER NOT NULL DEFAULT 0,
+  balance_alert_days INTEGER NOT NULL DEFAULT 3,
+  balance_updated_at TEXT NOT NULL,
+  PRIMARY KEY(provider, currency)
+);
 CREATE TABLE IF NOT EXISTS provider_settings (
   provider TEXT PRIMARY KEY COLLATE NOCASE,
   cabinet_url TEXT NOT NULL DEFAULT '',
@@ -215,6 +223,27 @@ class Database:
                 "(SELECT 1 FROM daily_rate_history r WHERE r.server_id=servers.id)",
                 (date.today().isoformat(),),
             )
+            # One-time migration: settle each legacy VPS balance to today, then
+            # combine by provider and currency. Never repeat on subsequent starts.
+            done = c.execute("SELECT value FROM meta WHERE key='provider_balance_migrated'").fetchone()
+            if not done:
+                today = date.today()
+                balances = c.execute("SELECT * FROM servers WHERE billing_mode='balance' AND cycle='daily'").fetchall()
+                for srv in balances:
+                    asof_raw = srv['balance_updated_at']
+                    try:
+                        asof = date.fromisoformat(str(asof_raw)[:10]) if asof_raw else today
+                    except ValueError:
+                        asof = today
+                    remaining = max(0, int(srv['balance_minor']) - max(0, (today-asof).days)*int(srv['amount_minor']))
+                    provider = str(srv['provider']).strip()
+                    currency = str(srv['currency']).upper()
+                    c.execute("INSERT INTO provider_balances(provider,currency,balance_minor,balance_alert_days,balance_updated_at) "
+                              "VALUES(?,?,?,?,?) ON CONFLICT(provider,currency) DO UPDATE SET "
+                              "balance_minor=balance_minor+excluded.balance_minor, "
+                              "balance_alert_days=MIN(balance_alert_days,excluded.balance_alert_days)",
+                              (provider,currency,remaining,int(srv['balance_alert_days']),now_iso()))
+                c.execute("INSERT INTO meta(key,value) VALUES('provider_balance_migrated','1')")
             ts = now_iso()
             for key, value in DEFAULT_SETTINGS.items():
                 c.execute(
@@ -267,12 +296,29 @@ class Database:
             raise ValueError("Неизвестная валюта")
         ts = now_iso()
         with self.conn() as c:
+            # Settle the old total BEFORE including this VPS in the daily cost.
+            prior_account = None
+            if billing_mode == 'balance' and cycle == 'daily':
+                if self.provider_balance(provider.strip(),currency,connection=c) is not None:
+                    prior_account = self._settle_provider_balance(c,provider.strip(),currency,date.today())
             cur = c.execute(
                 "INSERT INTO servers(name,provider,amount_minor,currency,next_due,cycle,cycle_days,notes,billing_mode,balance_minor,balance_alert_days,balance_updated_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (name.strip(), provider.strip(), amount_minor, currency, next_due, cycle, cycle_days, notes.strip(), billing_mode, int(balance_minor), int(balance_alert_days), ts if billing_mode == "balance" else None, ts, ts),
             )
             sid = int(cur.lastrowid)
             if billing_mode == "balance" and cycle == "daily":
+                account = prior_account or self._settle_provider_balance(c,provider.strip(),currency,date.today())
+                # When joining an existing hoster, entered balance must not overwrite it.
+                # Apply initial balance only for the first VPS/account.
+                count = c.execute("SELECT COUNT(*) FROM servers WHERE provider=? COLLATE NOCASE AND currency=? "
+                                  "AND cycle='daily' AND billing_mode='balance' AND id<>?",
+                                  (provider.strip(),currency,sid)).fetchone()[0]
+                if count == 0:
+                    c.execute("UPDATE provider_balances SET balance_minor=?,balance_alert_days=?,balance_updated_at=? "
+                              "WHERE provider=? COLLATE NOCASE AND currency=?",
+                              (int(balance_minor),int(balance_alert_days),ts,provider.strip(),currency))
+                    account['remaining_minor'] = int(balance_minor)
+                self._update_provider_due(c,provider.strip(),currency,account['remaining_minor'],date.today())
                 c.execute(
                     "INSERT INTO daily_rate_history(server_id,effective_day,amount_minor) VALUES(?,?,?)",
                     (sid, date.today().isoformat(), amount_minor),
@@ -499,13 +545,10 @@ class Database:
             row = c.execute("SELECT * FROM servers WHERE id=?", (server_id,)).fetchone()
             if not row or not row["active"] or row["deleted_at"] or row["archived_at"] or row["cycle"] != "daily" or row["billing_mode"] != "balance" or int(row["amount_minor"]) != expected_amount:
                 return False
-            remaining = self.balance_remaining_minor(dict(row), today)
-            days_left = remaining // max(1, new_amount)
-            due = (today + timedelta(days=days_left)).isoformat()
-            c.execute(
-                "UPDATE servers SET amount_minor=?,balance_minor=?,balance_updated_at=?,next_due=?,updated_at=? WHERE id=?",
-                (new_amount, remaining, stamp, due, stamp, server_id),
-            )
+            provider,currency = row['provider'],row['currency']
+            account = self._settle_provider_balance(c,provider,currency,today)
+            c.execute("UPDATE servers SET amount_minor=?,updated_at=? WHERE id=?",(new_amount,stamp,server_id))
+            self._update_provider_due(c,provider,currency,account['remaining_minor'],today)
             c.execute(
                 "INSERT INTO daily_rate_history(server_id,effective_day,amount_minor) VALUES(?,?,?) "
                 "ON CONFLICT(server_id,effective_day) DO UPDATE SET amount_minor=excluded.amount_minor",
@@ -1030,24 +1073,46 @@ class Database:
         new = " ".join(str(new).strip().split())[:80]
         if not old or not new:
             raise ValueError("Название не может быть пустым")
+        if old.casefold() == new.casefold():
+            with self.conn() as c:
+                cur = c.execute("UPDATE servers SET provider=?,updated_at=? WHERE provider=? COLLATE NOCASE",
+                                (new,now_iso(),old))
+                c.execute("UPDATE provider_balances SET provider=? WHERE provider=? COLLATE NOCASE",(new,old))
+                return int(cur.rowcount)
         with self.conn() as c:
-            cur = c.execute(
-                "UPDATE servers SET provider=?, updated_at=? WHERE lower(trim(provider))=lower(trim(?))",
-                (new, datetime.now(timezone.utc).isoformat(), old),
-            )
-            link = c.execute("SELECT cabinet_url FROM provider_settings WHERE provider=? COLLATE NOCASE", (old,)).fetchone()
-            target_link = c.execute("SELECT cabinet_url FROM provider_settings WHERE provider=? COLLATE NOCASE", (new,)).fetchone()
+            # Settle both accounts while their original server memberships still apply.
+            accounts = c.execute("SELECT currency FROM provider_balances WHERE provider=? COLLATE NOCASE",(old,)).fetchall()
+            amounts = {}
+            for row in accounts:
+                currency = row['currency']
+                source = self._settle_provider_balance(c,old,currency,date.today())
+                target = self.provider_balance(new,currency,connection=c)
+                if target:
+                    target = self._settle_provider_balance(c,new,currency,date.today())
+                amounts[currency] = (source['remaining_minor'],target['remaining_minor'] if target else None)
+            cur = c.execute("UPDATE servers SET provider=?,updated_at=? WHERE provider=? COLLATE NOCASE",
+                            (new,now_iso(),old))
+            for currency,(source,target) in amounts.items():
+                if target is None:
+                    c.execute("UPDATE provider_balances SET provider=? WHERE provider=? COLLATE NOCASE AND currency=?",
+                              (new,old,currency))
+                    total = source
+                else:
+                    total = source+target
+                    c.execute("UPDATE provider_balances SET balance_minor=?,balance_updated_at=? "
+                              "WHERE provider=? COLLATE NOCASE AND currency=?",
+                              (total,now_iso(),new,currency))
+                    c.execute("DELETE FROM provider_balances WHERE provider=? COLLATE NOCASE AND currency=?",(old,currency))
+                self._update_provider_due(c,new,currency,total,date.today())
+            link = c.execute("SELECT cabinet_url FROM provider_settings WHERE provider=? COLLATE NOCASE",(old,)).fetchone()
+            target_link = c.execute("SELECT cabinet_url FROM provider_settings WHERE provider=? COLLATE NOCASE",(new,)).fetchone()
             if link:
-                c.execute("DELETE FROM provider_settings WHERE provider=? COLLATE NOCASE", (old,))
-                # If the target provider already has its own LK URL, preserve it.
-                if not target_link or not str(target_link["cabinet_url"] or "").strip():
-                    c.execute(
-                        "INSERT INTO provider_settings(provider,cabinet_url,updated_at) VALUES(?,?,?) "
-                        "ON CONFLICT(provider) DO UPDATE SET cabinet_url=excluded.cabinet_url, updated_at=excluded.updated_at",
-                        (new, str(link["cabinet_url"] or ""), now_iso()),
-                    )
-            c.commit()
-            return int(cur.rowcount or 0)
+                c.execute("DELETE FROM provider_settings WHERE provider=? COLLATE NOCASE",(old,))
+                if not target_link or not str(target_link['cabinet_url'] or '').strip():
+                    c.execute("INSERT INTO provider_settings(provider,cabinet_url,updated_at) VALUES(?,?,?) "
+                              "ON CONFLICT(provider) DO UPDATE SET cabinet_url=excluded.cabinet_url,updated_at=excluded.updated_at",
+                              (new,str(link['cabinet_url'] or ''),now_iso()))
+            return int(cur.rowcount)
 
     def rename_country(self, old: str, new: str) -> int:
         old = " ".join(str(old).strip().split())
@@ -1193,57 +1258,110 @@ class Database:
             tags.append(tag)
         self.update_server_field(server_id, "tags", ",".join(tags))
 
-    def balance_remaining_minor(self, server: dict, on_date: date | None = None) -> int:
-        if str(server.get("billing_mode") or "scheduled") != "balance":
-            return int(server.get("balance_minor") or 0)
+    def provider_daily_cost(self, provider: str, currency: str, connection=None) -> int:
+        """Total current daily burn across active balance-mode VPS."""
+        def query(c):
+            return int(c.execute("SELECT COALESCE(SUM(amount_minor),0) FROM servers WHERE "
+                "provider=? COLLATE NOCASE AND currency=? AND billing_mode='balance' "
+                "AND cycle='daily' AND active=1 AND deleted_at IS NULL AND archived_at IS NULL",
+                (provider,currency)).fetchone()[0])
+        if connection is not None:
+            return query(connection)
+        with self.conn() as c:
+            return query(c)
+
+    def provider_balance(self, provider: str, currency: str, on_date: date | None = None, connection=None) -> dict | None:
         on_date = on_date or date.today()
-        asof_raw = server.get("balance_updated_at")
-        try:
-            asof = date.fromisoformat(str(asof_raw)[:10]) if asof_raw else on_date
-        except ValueError:
-            asof = on_date
-        elapsed = max(0, (on_date - asof).days)
-        return max(0, int(server.get("balance_minor") or 0) - elapsed * int(server.get("amount_minor") or 0))
+        def query(c):
+            row = c.execute("SELECT * FROM provider_balances WHERE provider=? COLLATE NOCASE AND currency=?",
+                            (provider,currency)).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            try:
+                asof = date.fromisoformat(str(result['balance_updated_at'])[:10])
+            except ValueError:
+                asof = on_date
+            daily = self.provider_daily_cost(provider,currency,c)
+            result['daily_minor'] = daily
+            result['remaining_minor'] = max(0,int(result['balance_minor']) - max(0,(on_date-asof).days)*daily)
+            result['days_left'] = result['remaining_minor']//daily if daily else None
+            return result
+        if connection is not None:
+            return query(connection)
+        with self.conn() as c:
+            return query(c)
+
+    def provider_balances_for(self, provider: str) -> list[dict]:
+        with self.conn() as c:
+            currencies = [r[0] for r in c.execute(
+                "SELECT currency FROM provider_balances WHERE provider=? COLLATE NOCASE ORDER BY currency",(provider,))]
+            return [self.provider_balance(provider,cur,connection=c) for cur in currencies]
+
+    def _settle_provider_balance(self, c, provider: str, currency: str, today: date) -> dict:
+        account = self.provider_balance(provider,currency,today,c)
+        if account is None:
+            c.execute("INSERT INTO provider_balances(provider,currency,balance_minor,balance_updated_at) VALUES(?,?,0,?)",
+                      (provider,currency,now_iso()))
+            account = self.provider_balance(provider,currency,today,c)
+        c.execute("UPDATE provider_balances SET balance_minor=?,balance_updated_at=? WHERE provider=? COLLATE NOCASE AND currency=?",
+                  (account['remaining_minor'],now_iso(),provider,currency))
+        return account
+
+    def _update_provider_due(self,c, provider: str, currency: str, remaining: int, today: date):
+        daily = self.provider_daily_cost(provider,currency,c)
+        days = remaining//daily if daily else 0
+        due = (today+timedelta(days=days)).isoformat()
+        c.execute("UPDATE servers SET next_due=?,updated_at=? WHERE provider=? COLLATE NOCASE "
+                  "AND currency=? AND billing_mode='balance' AND cycle='daily' "
+                  "AND active=1 AND deleted_at IS NULL AND archived_at IS NULL",
+                  (due,now_iso(),provider,currency))
+
+    def balance_remaining_minor(self, server: dict, on_date: date | None = None) -> int:
+        if str(server.get('billing_mode') or 'scheduled') != 'balance':
+            return int(server.get('balance_minor') or 0)
+        account = self.provider_balance(server['provider'],server['currency'],on_date)
+        return int(account['remaining_minor']) if account else 0
 
     def set_balance_remaining(self, server_id: int, new_balance_minor: int) -> bool:
-        """Reconcile to the provider's actual remaining balance without creating a payment.
-
-        Existing daily consumption stays in the rate-history ledger; only the
-        remaining amount and projected exhaustion date are reset today.
-        """
-        if (not isinstance(new_balance_minor, int) or isinstance(new_balance_minor, bool)
+        """Set shared provider balance, not a payment; all VPS use this amount."""
+        if (not isinstance(new_balance_minor,int) or isinstance(new_balance_minor,bool)
                 or not 0 <= new_balance_minor <= 10**15):
-            raise ValueError("Некорректная сумма баланса")
+            raise ValueError('Некорректная сумма баланса')
         today = date.today()
-        stamp = now_iso()
         with self.conn() as c:
-            row = c.execute("SELECT * FROM servers WHERE id=?", (server_id,)).fetchone()
-            if (not row or not row["active"] or row["deleted_at"] or row["archived_at"]
-                    or row["cycle"] != "daily" or row["billing_mode"] != "balance"):
+            row = c.execute('SELECT * FROM servers WHERE id=?',(server_id,)).fetchone()
+            if (not row or not row['active'] or row['deleted_at'] or row['archived_at']
+                    or row['cycle'] != 'daily' or row['billing_mode'] != 'balance'):
                 return False
-            daily_price = int(row["amount_minor"])
-            days_left = new_balance_minor // max(1, daily_price)
-            next_due = (today + timedelta(days=days_left)).isoformat()
-            c.execute(
-                "UPDATE servers SET balance_minor=?,balance_updated_at=?,next_due=?,updated_at=? WHERE id=?",
-                (new_balance_minor, stamp, next_due, stamp, server_id),
-            )
-        return True
+            provider,currency = row['provider'],row['currency']
+            self._settle_provider_balance(c,provider,currency,today)
+            c.execute('UPDATE provider_balances SET balance_minor=?,balance_updated_at=? WHERE provider=? COLLATE NOCASE AND currency=?',
+                      (new_balance_minor,now_iso(),provider,currency))
+            self._update_provider_due(c,provider,currency,new_balance_minor,today)
+            return True
 
     def topup_balance(self, server_id: int, amount_minor: int) -> int:
-        server = self.get_server(server_id)
-        if not server or str(server.get("billing_mode") or "") != "balance":
-            raise ValueError("Сервер не использует оплату с баланса")
-        remaining = self.balance_remaining_minor(server)
-        new_balance = remaining + int(amount_minor)
+        if not isinstance(amount_minor,int) or amount_minor<=0 or amount_minor>10**15:
+            raise ValueError('Некорректная сумма пополнения')
         today = date.today()
-        stamp = now_iso()
-        days_left = new_balance // max(1, int(server.get("amount_minor") or 1))
-        estimated_due = date.fromordinal(today.toordinal() + days_left).isoformat()
         with self.conn() as c:
-            c.execute("UPDATE servers SET balance_minor=?, balance_updated_at=?, next_due=?, updated_at=? WHERE id=?", (new_balance, stamp, estimated_due, stamp, server_id))
-        self.record_payment_only(server_id, int(amount_minor), server["currency"], today.isoformat(), note="Пополнение баланса")
-        return new_balance
+            server = c.execute('SELECT * FROM servers WHERE id=?',(server_id,)).fetchone()
+            if (not server or not server['active'] or server['deleted_at'] or server['archived_at']
+                    or server['billing_mode'] != 'balance' or server['cycle'] != 'daily'):
+                raise ValueError('Сервер не использует оплату с баланса')
+            provider,currency = server['provider'],server['currency']
+            account = self._settle_provider_balance(c,provider,currency,today)
+            balance = account['remaining_minor']+amount_minor
+            if balance>10**15:
+                raise ValueError('Баланс слишком большой')
+            c.execute('UPDATE provider_balances SET balance_minor=?,balance_updated_at=? WHERE provider=? COLLATE NOCASE AND currency=?',
+                      (balance,now_iso(),provider,currency))
+            self._update_provider_due(c,provider,currency,balance,today)
+            # Atomic payment + account update: report spending just once for the hoster.
+            c.execute('INSERT INTO payments(server_id,amount_minor,currency,due_date,paid_at,next_due,note) VALUES(?,?,?,?,?,?,?)',
+                      (server_id,amount_minor,currency,today.isoformat(),now_iso(),today.isoformat(),'Пополнение общего баланса хостера'))
+            return balance
 
     def enable_monitoring_for_all_with_ip(self) -> tuple[int, int]:
         with self.conn() as c:

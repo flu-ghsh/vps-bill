@@ -150,10 +150,7 @@ def server_edit_back_keyboard(server_id: int, emojis: dict[str, str]) -> InlineK
 
 def server_buttons(server_id: int, emojis: dict[str, str], *, balance_mode: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    if balance_mode:
-        rows.append([button(emojis, "payments", "Пополнил баланс", f"balance:topup:{server_id}", style="success")])
-        rows.append([button(emojis, "money", "Изменить баланс", f"balance:adjust:{server_id}")])
-    else:
+    if not balance_mode:
         rows.append([
             button(emojis, "paid", "Оплатил", f"paid:{server_id}", style="success"),
             button(emojis, "snooze", "Напомнить завтра", f"snooze:{server_id}"),
@@ -576,10 +573,14 @@ def dictionary_items_keyboard(kind: str, items: list[str], emojis: dict[str, str
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def dictionary_edit_keyboard(kind: str, idx: int, emojis: dict[str, str], provider_url: str = "") -> InlineKeyboardMarkup:
+def dictionary_edit_keyboard(kind: str, idx: int, emojis: dict[str, str], provider_url: str = "", accounts: list[dict] | None = None) -> InlineKeyboardMarkup:
     rows = [[button(emojis, "edit", "Переименовать", f"dict:rename:{kind}:{idx}")]]
     if kind == "provider":
         rows.append([button(emojis, "provider", "Ссылка на ЛК", f"dict:url:{idx}")])
+        for account in (accounts or []):
+            currency = account['currency']
+            rows.append([button(emojis, "payments", f"Пополнить баланс {currency}", f"hostbalance:topup:{idx}:{currency}", style="success")])
+            rows.append([button(emojis, "money", f"Изменить баланс {currency}", f"hostbalance:adjust:{idx}:{currency}")])
         if provider_url:
             cabinet_id = emojis.get("cabinet", "")
             cabinet_text = "Открыть ЛК" if cabinet_id else f"{EMOJI_SLOTS['cabinet'][0]} Открыть ЛК"
@@ -741,15 +742,6 @@ def server_card(server: dict, emojis: dict[str, str]) -> str:
         when = f"через {d} дн."
 
     if str(server.get("billing_mode") or "scheduled") == "balance":
-        from datetime import date as _date
-        asof_raw = server.get("balance_updated_at")
-        try:
-            asof = _date.fromisoformat(str(asof_raw)[:10]) if asof_raw else _date.today()
-        except ValueError:
-            asof = _date.today()
-        elapsed = max(0, (_date.today() - asof).days)
-        remaining = max(0, int(server.get("balance_minor") or 0) - elapsed * int(server.get("amount_minor") or 0))
-        days_left = remaining // max(1, int(server.get("amount_minor") or 1))
         state = f"{e(emojis, 'status_active')} активен"
         lines = [
             f"{e(emojis, 'server')} <b>{h(server['name'])}</b>",
@@ -757,8 +749,7 @@ def server_card(server: dict, emojis: dict[str, str]) -> str:
             "",
             f"{e(emojis, 'provider')} <b>{h(server['provider'] or '-')}</b>",
             f"{e(emojis, 'money')} В сутки: <b>{money(server['amount_minor'], server['currency'])}</b>",
-            f"{e(emojis, 'payments')} Баланс: <b>{money(remaining, server['currency'])}</b> · примерно <b>{days_left} дн.</b>",
-            f"{e(emojis, 'reminders')} Предупредить: когда останется на <b>{int(server.get('balance_alert_days') or 3)} дн.</b>",
+            "Баланс общий для хостера · Справочники → Хостеры",
         ]
     else:
         lines = [
